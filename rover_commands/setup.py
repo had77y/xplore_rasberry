@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
         'subscriber = rover_commands.subscriber:main',
+        'autonomous_node = rover_commands.autonomous_node:main',
         ],
     },
 )
