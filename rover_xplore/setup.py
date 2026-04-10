@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-        'camera_node = rover_xplore.camera_node:main',
+            'camera_node = rover_xplore.camera_node:main',
+            'mode_manager_node = rover_xplore.mode_manager_node:main',
         ],
     },
 )
