@@ -15,6 +15,17 @@ Communication : ROS2 DDS via réseau (`--net=host` des deux côtés).
 
 ---
 
+## Défis du rover
+
+| Défi | Mode | Description |
+|------|------|-------------|
+| Course FPV | `teleop` | L'opérateur pilote en regardant le flux caméra |
+| Ramassage d'objets | `teleop` | Bras robotique commandé à distance, dépôt à la base |
+| Collaboratif | TBD | Avec d'autres rovers — specs pas encore connues |
+| Navigation autonome | `autonomous` | Le rover navigue seul sans intervention humaine |
+
+---
+
 ## Stratégie de navigation autonome
 
 ### Détection d'obstacles
@@ -32,6 +43,44 @@ Communication : ROS2 DDS via réseau (`--net=host` des deux côtés).
 | 3× US | `/distances` | Sécurité (couche basse) |
 | Encodeurs moteurs | TBD | Odométrie précise |
 | IMU | TBD | Odométrie précise |
+
+---
+
+## Modes de fonctionnement
+
+| Mode | Touche PC | Topic | Description |
+|------|-----------|-------|-------------|
+| `autonomous` | `A` | `/rover/mode` | Navigation autonome |
+| `teleop` | `C` | `/rover/mode` | Commandé par l'opérateur (course FPV + défi bras) |
+
+Flux : `mode_selector_node` (PC) → `/rover/mode` → `mode_manager_node` (Raspberry)
+
+---
+
+## Téléopération — architecture
+
+### Topics
+| Topic | Type | Direction | Description |
+|-------|------|-----------|-------------|
+| `/rover/mode` | `std_msgs/String` | PC → RPi | Sélection du mode |
+| `/rover/cmd_vel` | `geometry_msgs/Twist` | PC → RPi | Commandes de déplacement |
+
+### Contrôle clavier (teleop_node)
+- Flèches du clavier — **hold-to-move** : maintenir = avance, relâcher = stop
+- `↑/↓` → `linear.x` (avant/arrière)
+- `←/→` → `angular.z` (rotation)
+- `↑ + ←` = virage en arc, `←` seul = pivot sur place
+- `Espace` = stop immédiat
+- Mécanisme : key repeat OS (~30ms) + timeout par axe (200ms) — si plus de répétitions → axe remis à 0
+
+### Gestion de la vitesse (à implémenter)
+- Touches `1/2/3` pour changer le multiplicateur de vitesse pendant le roulage
+- Option A : `1/2/3` changent linear ET angular ensemble (intuitif pour la course)
+- Option B : linear et angular indépendants (précision pour le défi bras)
+- **À décider** : mode course → tout ensemble, mode bras → séparé ?
+
+### Sécurité réseau
+- `teleop_receiver_node` stoppe les moteurs si aucune commande reçue depuis 500ms
 
 ---
 
@@ -66,10 +115,10 @@ python3.12 camera_server.py
 | Fichier | État |
 |---------|------|
 | `rover_xplore/rover_xplore/camera_node.py` | À mettre à jour → lire MJPEG bridge |
-| `rover_xplore/rover_xplore/mode_manager_node.py` | Créé — subscribe /rover/mode, log le mode reçu |
+| `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — subscribe /rover/mode, dispatche selon le mode |
+| `rover_xplore/rover_xplore/teleop_receiver_node.py` | Prêt — reçoit Twist, log mouvements, timeout sécurité 500ms |
 | `camera_server.py` (racine) | À créer — picamera2 HTTP server |
 | `rover_xplore/rover_xplore/autonomous_node.py` | À créer |
-| `rover_xplore/rover_xplore/teleop_node.py` | À créer — commandes moteurs depuis PC |
 | `rover_xplore/rover_xplore/arm_node.py` | À créer — main robotique (défi 2) |
 | `rover_xplore/rover_xplore/ultrasonic_node.py` | À créer |
 | `rover_xplore/rover_xplore/imu_node.py` | À créer |
@@ -79,7 +128,8 @@ python3.12 camera_server.py
 | Fichier | État |
 |---------|------|
 | `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Prêt — compatible avec /camera/image_raw |
-| `rover_xplore_pub/rover_xplore_pub/mode_selector_node.py` | Créé — clavier A/C → publie /rover/mode |
+| `rover_xplore_pub/rover_xplore_pub/mode_selector_node.py` | Prêt — clavier A/C → publie /rover/mode |
+| `rover_xplore_pub/rover_xplore_pub/teleop_node.py` | Prêt — flèches clavier → publie /rover/cmd_vel |
 
 ---
 
@@ -87,7 +137,7 @@ python3.12 camera_server.py
 
 - Docker : `docker_humble_desktop/` — ROS 2 Humble Desktop (les deux repos)
 - CI : GitHub Actions `docker_ci.yml`
-- Branche active (rover) : `fix/camera-picamera2`
+- Branches actives : `feat/mode-selection` (les deux repos), `fix/camera-picamera2` (rover uniquement)
 
 ---
 
@@ -96,17 +146,6 @@ python3.12 camera_server.py
 - Package rover : `rover_xplore` uniquement (pas `rover_commands`)
 - Package PC : `rover_xplore_pub` uniquement (pas `rover_commands`)
 - Commentaires en français, variables/fonctions en anglais
-
----
-
-## Modes de fonctionnement
-
-| Mode | Touche PC | Topic | Description |
-|------|-----------|-------|-------------|
-| `autonomous` | `A` | `/rover/mode` | Navigation IA autonome |
-| `teleop` | `C` | `/rover/mode` | Commandé par l'opérateur (course FPV + défi bras) |
-
-Flux : `mode_selector_node` (PC) → `/rover/mode` → `mode_manager_node` (Raspberry)
 
 ---
 
