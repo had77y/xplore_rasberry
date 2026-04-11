@@ -38,30 +38,29 @@ class ModeManagerNode(Node):
         if mode == 'autonomous':
             self.get_logger().info('═' * 40)
             self.get_logger().info('  MODE : AUTONOME')
-            self.get_logger().info('  → navigation IA activée')
+            self.get_logger().info('  → navigation autonome activée')
             self.get_logger().info('═' * 40)
-            # TODO : démarrer autonomous_node
+            # TODO : démarrer autonomous_node (machine d'état 5 phases)
 
         elif mode == 'race':
             self.get_logger().info('═' * 40)
             self.get_logger().info('  MODE : RACE (FPV)')
-            self.get_logger().info('  → en attente des commandes opérateur')
+            self.get_logger().info('  → motor_controller_node actif sur /rover/cmd_vel')
             self.get_logger().info('═' * 40)
-            # TODO : activer moteurs
 
         elif mode == 'arm':
             self.get_logger().info('═' * 40)
             self.get_logger().info('  MODE : BRAS (ramassage)')
             self.get_logger().info('  → en attente des commandes bras')
             self.get_logger().info('═' * 40)
-            # TODO : activer arm_node
+            # TODO : démarrer arm_node
 
         elif mode == 'idle':
             self.get_logger().info('═' * 40)
             self.get_logger().info('  MODE : IDLE')
             self.get_logger().info('  → rover en attente')
             self.get_logger().info('═' * 40)
-            # TODO : stopper tous les actionneurs
+            # motor_controller_node stoppe les moteurs dès réception du mode idle
 
         else:
             self.get_logger().warn(f'Mode inconnu reçu : "{mode}" — ignoré')

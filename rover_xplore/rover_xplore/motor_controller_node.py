@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
 import serial
 
 
@@ -32,23 +33,32 @@ class MotorControllerNode(Node):
     def __init__(self):
         super().__init__('motor_controller_node')
 
+        self.current_mode = None
+
         # ── Serial ───────────────────────────────────────────────────
         self.ser = None
         self._connect_serial()
 
-        # ── Subscriber ───────────────────────────────────────────────
-        self.subscription = self.create_subscription(
-            Twist,
-            '/rover/cmd_vel',
-            self.cmd_callback,
-            10
-        )
+        # ── Subscribers ──────────────────────────────────────────────
+        self.create_subscription(String, '/rover/mode', self.mode_callback, 10)
+        self.create_subscription(Twist, '/rover/cmd_vel', self.cmd_callback, 10)
 
         # ── Safety timeout ───────────────────────────────────────────
         self.last_msg_time = self.get_clock().now()
         self.safety_timer = self.create_timer(0.1, self.check_timeout)
 
         self.get_logger().info('motor_controller_node démarré')
+
+    # ── Mode ─────────────────────────────────────────────────────────
+
+    def mode_callback(self, msg: String):
+        mode = msg.data
+        if mode == self.current_mode:
+            return
+        self.current_mode = mode
+        self.get_logger().info(f'Mode reçu : {mode}')
+        if mode != 'race':
+            self._send_motors(0.0, 0.0)
 
     # ── Connexion serial ─────────────────────────────────────────────
 
@@ -65,6 +75,9 @@ class MotorControllerNode(Node):
 
     def cmd_callback(self, msg: Twist):
         """Reçoit Twist, convertit en vitesses roues, envoie à l'Arduino."""
+        if self.current_mode != 'race':
+            return
+
         self.last_msg_time = self.get_clock().now()
 
         linear  = msg.linear.x
