@@ -23,6 +23,7 @@ setup(
             'camera_node = rover_xplore.camera_node:main',
             'mode_manager_node = rover_xplore.mode_manager_node:main',
             'teleop_receiver_node = rover_xplore.teleop_receiver_node:main',
+            'motor_controller_node = rover_xplore.motor_controller_node:main',
         ],
     },
 )
