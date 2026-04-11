@@ -42,12 +42,26 @@ class ModeManagerNode(Node):
             self.get_logger().info('═' * 40)
             # TODO : démarrer autonomous_node
 
-        elif mode == 'teleop':
+        elif mode == 'race':
             self.get_logger().info('═' * 40)
-            self.get_logger().info('  MODE : COMMANDÉ (téléop)')
+            self.get_logger().info('  MODE : RACE (FPV)')
             self.get_logger().info('  → en attente des commandes opérateur')
             self.get_logger().info('═' * 40)
-            # TODO : démarrer teleop_node + arm_node
+            # TODO : activer moteurs
+
+        elif mode == 'arm':
+            self.get_logger().info('═' * 40)
+            self.get_logger().info('  MODE : BRAS (ramassage)')
+            self.get_logger().info('  → en attente des commandes bras')
+            self.get_logger().info('═' * 40)
+            # TODO : activer arm_node
+
+        elif mode == 'idle':
+            self.get_logger().info('═' * 40)
+            self.get_logger().info('  MODE : IDLE')
+            self.get_logger().info('  → rover en attente')
+            self.get_logger().info('═' * 40)
+            # TODO : stopper tous les actionneurs
 
         else:
             self.get_logger().warn(f'Mode inconnu reçu : "{mode}" — ignoré')
