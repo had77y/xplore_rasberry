@@ -6,12 +6,12 @@ Ce fichier est mis à jour automatiquement pour garder le contexte entre session
 
 ## Architecture générale
 
-| | Repo | Machine | Package |
-|--|------|---------|---------|
-| **Rover** | `xplore_rasberry` | Raspberry Pi 4 — Docker ROS2 Humble | `rover_xplore` |
-| **PC** | `xplore_pub` | PC/VM Ubuntu 24 — Docker ROS2 Humble | `rover_xplore_pub` |
+| | Repo | Chemin local | Machine | Package |
+|--|------|-------------|---------|---------|
+| **Rover** | `xplore_rasberry` | `/Users/hadyazzi/Desktop/Personal/xplore/xplore_rasberry` | Raspberry Pi 4 — Ubuntu 22.04, ROS2 Humble natif | `rover_xplore` |
+| **PC** | `xplore_pub` | `/Users/hadyazzi/Desktop/Personal/xplore/xplore_pub` | VM/Mac — ROS2 Humble | `rover_xplore_pub` |
 
-Communication : ROS2 DDS via réseau (`--net=host` des deux côtés).
+Communication : ROS2 DDS via réseau local (même subnet, ROS_DOMAIN_ID identique).
 
 ---
 
@@ -22,7 +22,7 @@ Communication : ROS2 DDS via réseau (`--net=host` des deux côtés).
 | Moteurs roues JGA25-370 (DC + encodeur) | 4 | encodeur 6 fils, quadrature A/B |
 | Moteurs bras robotisé | 5 | type à confirmer avec team élec |
 | Moteur benne (conteneur) | 1 | tilt pour vider |
-| Caméra Pi | 1 | MJPEG bridge host → Docker |
+| Caméra Pi | 1 | libcamera (picamera2) natif Ubuntu 22 |
 | Capteurs ultrasoniques (US) | 5 (prévu) | 3 avant + 2 côtés à 45° |
 | IMU | 1 | fusion avec encodeurs via EKF |
 | Raspberry Pi 4 | 1 | compute principal, ROS2 |
@@ -203,27 +203,36 @@ Pas besoin de coder le Kalman manuellement.
 
 ---
 
-## Problème caméra — état actuel
+## Caméra — architecture actuelle
 
-**Cause racine** : libcamera Python bindings compilés pour Python 3.12 (Ubuntu 24.04 host),
-incompatibles avec Docker ROS2 Humble (Python 3.10). Pas de solution connue dans la communauté.
+**Contexte :** Ubuntu 24 + Docker posait un problème de compatibilité Python (libcamera 3.12 vs Docker 3.10).
+**Solution :** migration vers Ubuntu 22.04 sur le RPi — ROS Humble natif, libcamera fonctionne directement.
 
-**Solution choisie : MJPEG bridge**
+### Stack caméra
+
 ```
-Host RPi
-  └── camera_server.py  (picamera2, PYTHONPATH fixé, Python 3.12)
-        ↓ HTTP MJPEG — 127.0.0.1:8080 (loopback, ~0ms latence réseau)
-Docker ROS2 Humble
-  └── camera_node.py  (cv2.VideoCapture HTTP → publie /camera/image_raw)
-        ↓ ROS2 DDS
-PC Docker ROS2 Humble
-  └── video_viewer_node.py  (déjà compatible, aucune modif nécessaire)
+RPi Ubuntu 22 (natif, pas Docker)
+  └── camera_node.py
+        picamera2 (libcamera Python API)  ←  capture BGR888 640x480 @ 30 FPS
+        cv2                               ←  encoding bgr8
+        ↓ /camera/image_raw (sensor_msgs/Image)
+        ↓ ROS2 DDS réseau local
+VM/Mac
+  └── video_viewer_node.py
+        cv2.imshow()  ←  affichage FPV
 ```
 
-**Lancer camera_server.py sur le host RPi :**
+### Détail camera_node.py
+- **Backend libcamera** : `picamera2` avec `BGR888` natif → zéro conversion couleur
+- **FPS verrouillé hardware** : `FrameDurationLimits` = 33 333 µs (30 FPS exact)
+- **Warmup non-bloquant** : drain de 30 frames (AEC/AWB convergence), pas de `sleep`
+- **Fallback automatique** : si `picamera2` absent (VM), bascule sur `cv2.VideoCapture(0)`
+- **Cleanup propre** : `cam.stop()` / `cap.release()` dans `destroy_node`
+
+### Dépendances RPi (Ubuntu 22 natif)
 ```bash
-PYTHONPATH=/usr/lib/aarch64-linux-gnu/python3.12/site-packages \
-python3.12 camera_server.py
+sudo apt install python3-picamera2
+pip install opencv-python
 ```
 
 ---
@@ -233,10 +242,10 @@ python3.12 camera_server.py
 ### Repo Rover (`xplore_rasberry`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore/rover_xplore/camera_node.py` | À mettre à jour → lire MJPEG bridge |
+| `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, BGR888 30 FPS, fallback V4L2 |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — gère autonomous/race/arm/idle |
-| `rover_xplore/rover_xplore/teleop_receiver_node.py` | Prêt — reçoit Twist, timeout sécurité 500ms |
-| `camera_server.py` (racine) | À créer — picamera2 HTTP server |
+| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — cinématique diff, serial Arduino, gating par mode, PID en commentaire |
+| `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
 | `rover_xplore/rover_xplore/autonomous_node.py` | À créer |
 | `rover_xplore/rover_xplore/aruco_node.py` | À créer |
 | `rover_xplore/rover_xplore/obstacle_avoidance_node.py` | À créer |
@@ -249,7 +258,7 @@ python3.12 camera_server.py
 | Fichier | État |
 |---------|------|
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Prêt — menu + race + bras |
-| `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Prêt |
+| `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Prêt — placeholder si pas de flux, fenêtre redimensionnable |
 | `rover_xplore_pub/rover_xplore_pub/teleop_node.py` | Remplacé par controller_node |
 | `rover_xplore_pub/rover_xplore_pub/mode_selector_node.py` | Remplacé par controller_node |
 
@@ -257,7 +266,8 @@ python3.12 camera_server.py
 
 ## Infrastructure
 
-- Docker : `docker_humble_desktop/` — ROS 2 Humble Desktop (les deux repos)
+- RPi : Ubuntu 22.04, ROS 2 Humble **natif** (plus de Docker)
+- VM/Mac : ROS 2 Humble (Docker ou natif selon env)
 - CI : GitHub Actions `docker_ci.yml` — build sur push vers `master` uniquement
 - Branches actives : `feat/mode-selection` (les deux repos)
 
@@ -268,8 +278,8 @@ python3.12 camera_server.py
 - Package rover : `rover_xplore` uniquement
 - Package PC : `rover_xplore_pub` uniquement
 - Commentaires en français, variables/fonctions en anglais
-- Commits sans co-author
+- **Commits sans co-author** — ne jamais ajouter `Co-Authored-By: Claude` dans les messages de commit
 
 ---
 
-*Dernière mise à jour : 2026-04-11*
+*Dernière mise à jour : 2026-04-14 (session 3)*

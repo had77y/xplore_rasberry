@@ -2,52 +2,105 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from picamera2 import Picamera2
-import time
+import cv2
+
+try:
+    from picamera2 import Picamera2
+    LIBCAMERA_AVAILABLE = True
+except ImportError:
+    LIBCAMERA_AVAILABLE = False
+
+FRAME_W = 640
+FRAME_H = 480
+TARGET_FPS = 30
+WARMUP_FRAMES = TARGET_FPS  # ~1s de drain AEC/AWB
 
 
 class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
-
-        self.image_pub = self.create_publisher(Image, '/camera/image_raw', 10)
         self.bridge = CvBridge()
+        self.pub = self.create_publisher(Image, '/camera/image_raw', 10)
 
-        self.camera = Picamera2()
+        if LIBCAMERA_AVAILABLE:
+            self._init_libcamera()
+        else:
+            self._init_v4l2()
 
-        # create_video_configuration pour le streaming continu (pas still qui donne des frames noires)
-        config = self.camera.create_video_configuration(
-            main={"size": (640, 480), "format": "RGB888"}
+        self.timer = self.create_timer(1.0 / TARGET_FPS, self.capture_and_publish)
+        backend = 'libcamera' if LIBCAMERA_AVAILABLE else 'V4L2'
+        self.get_logger().info(
+            f'camera_node démarré — {backend} {FRAME_W}x{FRAME_H} @ {TARGET_FPS} FPS'
         )
-        self.camera.configure(config)
-        self.camera.start()
 
-        # Laisser le temps au capteur de s'initialiser (AEC/AWB convergence)
-        time.sleep(2.0)
+    # ------------------------------------------------------------------
+    # Init backends
+    # ------------------------------------------------------------------
 
-        # Warmup : vider le buffer de démarrage
-        for _ in range(5):
-            self.camera.capture_array("main")
+    def _init_libcamera(self):
+        self.cam = Picamera2()
+        frame_duration_us = int(1_000_000 / TARGET_FPS)
+        cfg = self.cam.create_video_configuration(
+            main={"size": (FRAME_W, FRAME_H), "format": "BGR888"},
+            controls={"FrameDurationLimits": (frame_duration_us, frame_duration_us)},
+        )
+        self.cam.configure(cfg)
+        self.cam.start()
+        # Drain des premières frames pour laisser AEC/AWB converger
+        for _ in range(WARMUP_FRAMES):
+            self.cam.capture_array("main")
+        self.capture_fn = lambda: self.cam.capture_array("main")
 
-        self.get_logger().info('camera_node started — video config, warmup done')
-        self.timer = self.create_timer(0.066, self.capture_frame)  # ~15 FPS
+    def _init_v4l2(self):
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+        self.cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+        if not self.cap.isOpened():
+            self.get_logger().error('Aucune caméra V4L2 disponible !')
+            raise RuntimeError('Camera introuvable')
+        self.capture_fn = self._capture_v4l2
 
-    def capture_frame(self):
-        frame = self.camera.capture_array("main")  # numpy array RGB888
+    def _capture_v4l2(self):
+        ret, frame = self.cap.read()
+        return frame if ret else None
+
+    # ------------------------------------------------------------------
+    # Boucle principale
+    # ------------------------------------------------------------------
+
+    def capture_and_publish(self):
+        frame = self.capture_fn()
         if frame is None:
-            self.get_logger().warn('Frame vide !')
+            self.get_logger().warn('Frame vide — skip')
             return
-        msg = self.bridge.cv2_to_imgmsg(frame, 'rgb8')
+        msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
         msg.header.stamp = self.get_clock().now().to_msg()
-        self.image_pub.publish(msg)
+        msg.header.frame_id = 'camera'
+        self.pub.publish(msg)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def destroy_node(self):
+        if LIBCAMERA_AVAILABLE and hasattr(self, 'cam'):
+            self.cam.stop()
+        elif hasattr(self, 'cap'):
+            self.cap.release()
+        super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = CameraNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

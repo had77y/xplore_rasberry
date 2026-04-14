@@ -30,10 +30,21 @@ class MotorControllerNode(Node):
     MAX_SPEED_MS  = 1.0    # m/s — À CALIBRER avec encodeurs ; 1.0 = identité pour téléop clavier
     TIMEOUT_SEC   = 0.5    # s  — stop si pas de commande depuis ce délai
 
+    # ── Paramètres PID — À CALIBRER sur le vrai hardware ────────────
+    # KP = 1.0   # gain proportionnel
+    # KI = 0.1   # gain intégral
+    # KD = 0.01  # gain dérivé
+
     def __init__(self):
         super().__init__('motor_controller_node')
 
         self.current_mode = None
+
+        # ── État PID par roue (décommenter quand encoder_node est prêt) ──
+        # self.pid_left  = {'integral': 0.0, 'prev_error': 0.0, 'prev_time': None}
+        # self.pid_right = {'integral': 0.0, 'prev_error': 0.0, 'prev_time': None}
+        # self.speed_left  = 0.0  # vitesse mesurée roue gauche (m/s) — via /wheel_odom
+        # self.speed_right = 0.0  # vitesse mesurée roue droite (m/s) — via /wheel_odom
 
         # ── Serial ───────────────────────────────────────────────────
         self.ser = None
@@ -83,13 +94,14 @@ class MotorControllerNode(Node):
         linear  = msg.linear.x
         angular = msg.angular.z
 
-        # Cinématique différentielle
+        # Cinématique différentielle — vitesses cibles par roue (m/s)
         v_left  = linear - angular * self.WHEEL_BASE / 2.0
         v_right = linear + angular * self.WHEEL_BASE / 2.0
 
-        # TODO PID : ici on enverrait v_left/v_right comme setpoints au PID
-        #            et on lirait les vitesses mesurées par les encodeurs.
-        #            Pour l'instant, conversion directe en %.
+        # ── PID (décommenter quand encoder_node publie /wheel_odom) ─────
+        # v_left  = self._pid(v_left,  self.speed_left,  self.pid_left)
+        # v_right = self._pid(v_right, self.speed_right, self.pid_right)
+        # ────────────────────────────────────────────────────────────────
 
         self._send_motors(v_left, v_right)
 
@@ -112,6 +124,37 @@ class MotorControllerNode(Node):
             except serial.SerialException as e:
                 self.get_logger().error(f'Erreur serial : {e}')
                 self.ser = None
+
+    # ── PID ──────────────────────────────────────────────────────────
+    #
+    # def _pid(self, setpoint: float, measured: float, state: dict) -> float:
+    #     """Calcule la sortie PID pour une roue."""
+    #     now = self.get_clock().now().nanoseconds / 1e9
+    #     if state['prev_time'] is None:
+    #         state['prev_time'] = now
+    #         return setpoint
+    #
+    #     dt = now - state['prev_time']
+    #     if dt <= 0:
+    #         return setpoint
+    #
+    #     error = setpoint - measured
+    #     state['integral']   += error * dt
+    #     derivative           = (error - state['prev_error']) / dt
+    #     state['prev_error']  = error
+    #     state['prev_time']   = now
+    #
+    #     return self.KP * error + self.KI * state['integral'] + self.KD * derivative
+    #
+    # def _odom_callback(self, msg):
+    #     """Reçoit les vitesses mesurées depuis encoder_node (/wheel_odom)."""
+    #     # msg.twist.linear.x  → vitesse roue gauche
+    #     # msg.twist.angular.z → vitesse roue droite
+    #     self.speed_left  = msg.twist.linear.x
+    #     self.speed_right = msg.twist.angular.z
+    #
+    # Abonnement à ajouter dans __init__ :
+    # self.create_subscription(TwistStamped, '/wheel_odom', self._odom_callback, 10)
 
     # ── Safety timeout ───────────────────────────────────────────────
 
