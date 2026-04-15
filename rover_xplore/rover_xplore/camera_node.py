@@ -54,15 +54,21 @@ class CameraNode(Node):
     def _init_v4l2(self):
         self.cap = None
         for idx in range(32):
-            cap = cv2.VideoCapture(idx)
+            path = f'/dev/video{idx}'
+            cap = cv2.VideoCapture(path, cv2.CAP_V4L)
             if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
                 cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
-                self.cap = cap
-                self.get_logger().info(f'V4L2: utilise /dev/video{idx}')
-                break
-            cap.release()
+                ret, _ = cap.read()
+                if ret:
+                    self.cap = cap
+                    self.get_logger().info(f'V4L2: utilise {path} (MJPG)')
+                    break
+                cap.release()
+            else:
+                cap.release()
         if self.cap is None:
             self.get_logger().error('Aucune caméra V4L2 disponible !')
             raise RuntimeError('Camera introuvable')
