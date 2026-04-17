@@ -203,36 +203,65 @@ Pas besoin de coder le Kalman manuellement.
 
 ---
 
-## Caméra — architecture actuelle
+## Caméra — architecture cible
 
-**Contexte :** Ubuntu 24 + Docker posait un problème de compatibilité Python (libcamera 3.12 vs Docker 3.10).
-**Solution :** migration vers Ubuntu 22.04 sur le RPi — ROS Humble natif, libcamera fonctionne directement.
+### Problème confirmé (session 2026-04-16)
 
-### Stack caméra
+La Pi Camera CSI ne fonctionne **pas** dans Docker sur Ubuntu 22.04 :
+- `python3-libcamera` absent des repos Ubuntu 22.04
+- `libcamera-tools` dans les repos Ubuntu = version 2020 (`0~git20200629`) → segfault
+- V4L2 direct (video14+) → timeout, ce sont des devices ISP, pas capture
+- GStreamer `libcamerasrc` → dépend aussi de libcamera
+- `camera_auto_detect=1` est bien dans `/boot/firmware/config.txt` → hardware OK
+
+Le problème n'était pas Ubuntu 24 → c'était Docker qui isole libcamera.
+
+### Solution retenue : bridge natif via DDS
+
+`camera_node` tourne **nativement** sur le Pi (hors Docker). Le container Docker utilise déjà `--net=host` (`run.sh`) → les topics ROS2 publiés en natif sont visibles dans Docker via DDS automatiquement.
 
 ```
-RPi Ubuntu 22 (natif, pas Docker)
+RPi Ubuntu 22 — NATIF (hors Docker)
   └── camera_node.py
-        picamera2 (libcamera Python API)  ←  capture BGR888 640x480 @ 30 FPS
-        cv2                               ←  encoding bgr8
-        ↓ /camera/image_raw (sensor_msgs/Image)
-        ↓ ROS2 DDS réseau local
-VM/Mac
-  └── video_viewer_node.py
-        cv2.imshow()  ←  affichage FPV
+        libcamera / picamera2  ←  capture Pi Camera CSI
+        ↓ /camera/image_raw
+        ↓ ROS2 DDS (--net=host → visible dans Docker)
+
+RPi Ubuntu 22 — Docker
+  └── tous les autres nodes (mode_manager, motor_controller, etc.)
+
+VM/Mac — Docker
+  └── video_viewer_node.py  ←  affiche le flux FPV
 ```
 
-### Détail camera_node.py
-- **Backend libcamera** : `picamera2` avec `BGR888` natif → zéro conversion couleur
-- **FPS verrouillé hardware** : `FrameDurationLimits` = 33 333 µs (30 FPS exact)
-- **Warmup non-bloquant** : drain de 30 frames (AEC/AWB convergence), pas de `sleep`
-- **Fallback automatique** : si `picamera2` absent (VM), bascule sur `cv2.VideoCapture(0)`
-- **Cleanup propre** : `cam.stop()` / `cap.release()` dans `destroy_node`
+### Déploiement sur le Pi (une seule fois)
 
-### Dépendances RPi (Ubuntu 22 natif)
+1. Installer ROS2 Humble nativement :
 ```bash
-sudo apt install python3-picamera2
-pip install opencv-python
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo tee /usr/share/keyrings/ros-archive-keyring.gpg > /dev/null
+echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/ros2.list
+sudo apt update && sudo apt install -y ros-humble-ros-base ros-humble-cv-bridge python3-colcon-common-extensions python3-picamera2 python3-opencv
+```
+
+2. Builder le workspace :
+```bash
+mkdir -p ~/dev_ws/src
+ln -s /path/to/xplore_rasberry ~/dev_ws/src/xplore_rasberry   # ou git clone
+cd ~/dev_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select rover_xplore
+```
+
+3. Lancer la caméra (à chaque démarrage, hors Docker) :
+```bash
+./scripts/start_camera.sh
+```
+
+Le topic `/camera/image_raw` devient visible dans Docker via `--net=host`.
+
+### Dépendances RPi (natif)
+```bash
+sudo apt install ros-humble-ros-base ros-humble-cv-bridge python3-picamera2 python3-opencv
 ```
 
 ---
@@ -243,6 +272,7 @@ pip install opencv-python
 | Fichier | État |
 |---------|------|
 | `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, BGR888 30 FPS, fallback V4L2 |
+| `scripts/start_camera.sh` | Prêt — lance camera_node natif sur le Pi hors Docker |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — gère autonomous/race/arm/idle |
 | `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — cinématique diff, serial Arduino, gating par mode, PID en commentaire |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
@@ -282,4 +312,4 @@ pip install opencv-python
 
 ---
 
-*Dernière mise à jour : 2026-04-14 (session 3)*
+*Dernière mise à jour : 2026-04-17 (session 5)*
