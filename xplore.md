@@ -234,34 +234,42 @@ VM/Mac — Docker
   └── video_viewer_node.py  ←  affiche le flux FPV
 ```
 
-### Déploiement sur le Pi (une seule fois)
+### État déploiement Pi (2026-04-20)
 
-1. Installer ROS2 Humble nativement :
+| Composant | État |
+|-----------|------|
+| ROS2 Humble (`rclpy`) | ✅ Installé |
+| cv2 (python3-opencv) | ✅ Installé |
+| `source /opt/ros/humble/setup.bash` dans `.bashrc` | ✅ Fait |
+| libcamera (compilé depuis sources RPi) | ✅ Installé dans `/usr/local/lib` |
+| picamera2 | ✅ Installé (pip, patch pykms appliqué) |
+| colcon build rover_xplore | ✅ Fait — branche `feat/mode-selection` |
+| camera_node fonctionnel | ✅ Publie `/camera/image_raw` @ 640x480 30 FPS |
+| VM voit le topic `/camera/image_raw` | ✅ DDS fonctionne |
+
+### Notes importantes post-install
+
+- `PYTHONPATH=/usr/local/lib/python3/dist-packages` dans `~/.bashrc` — nécessaire pour que libcamera soit trouvé
+- picamera2 pip patché : `/home/pi-hady/.local/lib/python3.10/site-packages/picamera2/previews/__init__.py` — import `DrmPreview` rendu optionnel (pykms absent sur Ubuntu 22)
+- Workspace ROS2 : `~/dev_ws/src/xplore_rasberry` (branche `feat/mode-selection`)
+
+### Lancer la caméra (commande unique)
+
 ```bash
-sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo tee /usr/share/keyrings/ros-archive-keyring.gpg > /dev/null
-echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/ros2.list
-sudo apt update && sudo apt install -y ros-humble-ros-base ros-humble-cv-bridge python3-colcon-common-extensions python3-picamera2 python3-opencv
+source ~/.bashrc && source ~/dev_ws/install/setup.bash && ros2 run rover_xplore camera_node
 ```
 
-2. Builder le workspace :
-```bash
-mkdir -p ~/dev_ws/src
-ln -s /path/to/xplore_rasberry ~/dev_ws/src/xplore_rasberry   # ou git clone
-cd ~/dev_ws
-source /opt/ros/humble/setup.bash
-colcon build --packages-select rover_xplore
-```
+### Problème restant — viewer freeze
 
-3. Lancer la caméra (à chaque démarrage, hors Docker) :
-```bash
-./scripts/start_camera.sh
-```
-
-Le topic `/camera/image_raw` devient visible dans Docker via `--net=host`.
+Le `video_viewer_node` sur la VM freeze après ~1s. À investiguer :
+- Possible problème bande passante (640x480 BGR non compressé @ 30 FPS = ~27 MB/s)
+- Possible problème DDS QoS
+- Pi chauffe beaucoup — surveiller la température
 
 ### Dépendances RPi (natif)
 ```bash
-sudo apt install ros-humble-ros-base ros-humble-cv-bridge python3-picamera2 python3-opencv
+sudo apt install ros-humble-ros-base ros-humble-cv-bridge python3-colcon-common-extensions python3-opencv libcap-dev
+pip3 install picamera2  # après libcamera compilé
 ```
 
 ---
@@ -312,4 +320,4 @@ sudo apt install ros-humble-ros-base ros-humble-cv-bridge python3-picamera2 pyth
 
 ---
 
-*Dernière mise à jour : 2026-04-17 (session 5)*
+*Dernière mise à jour : 2026-04-18 (session 6)*

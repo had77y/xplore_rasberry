@@ -1,3 +1,19 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FLUX DE DONNÉES
+#
+#   QUI ENVOIE  : camera_node (ce fichier) — tourne EN NATIF sur le Raspberry Pi
+#   CE QU'IL ENVOIE : une image BGR 640×480 @ 30 FPS
+#   TOPIC       : /camera/image_raw  (sensor_msgs/Image, encoding bgr8)
+#
+#   QUI REÇOIT  :
+#     → video_viewer_node (PC)   — affiche le flux FPV en temps réel
+#     → aruco_node (RPi)         — détecte le tag ArUco pour la navigation autonome
+#
+#   REMARQUE : ce node tourne HORS Docker (libcamera ne fonctionne pas dans Docker).
+#              Les autres nodes tournent dans Docker avec --net=host → ils voient
+#              ce topic automatiquement via ROS2 DDS.
+# ──────────────────────────────────────────────────────────────────────────────
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -20,11 +36,19 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
         self.bridge = CvBridge()
+
+        # Publication des frames — reçues par video_viewer_node (PC) et aruco_node (RPi)
         self.pub = self.create_publisher(Image, '/camera/image_raw', 10)
 
-        if LIBCAMERA_AVAILABLE:
+        libcamera_cameras = Picamera2.global_camera_info() if LIBCAMERA_AVAILABLE else []
+        if libcamera_cameras:
             self._init_libcamera()
         else:
+            if LIBCAMERA_AVAILABLE:
+                self.get_logger().warn(
+                    'libcamera disponible mais aucune caméra CSI détectée '
+                    '(vérifier câble CSI / dtoverlay) — fallback V4L2'
+                )
             self._init_v4l2()
 
         self.timer = self.create_timer(1.0 / TARGET_FPS, self.capture_and_publish)
@@ -38,6 +62,7 @@ class CameraNode(Node):
     # ------------------------------------------------------------------
 
     def _init_libcamera(self):
+        # Pi Camera CSI — backend natif libcamera via picamera2
         self.cam = Picamera2()
         frame_duration_us = int(1_000_000 / TARGET_FPS)
         cfg = self.cam.create_video_configuration(
@@ -52,6 +77,7 @@ class CameraNode(Node):
         self.capture_fn = lambda: self.cam.capture_array("main")
 
     def _init_v4l2(self):
+        # Fallback USB / VM — scan automatique des devices V4L2
         self.cap = None
         for idx in range(32):
             path = f'/dev/video{idx}'
@@ -87,6 +113,10 @@ class CameraNode(Node):
         if frame is None:
             self.get_logger().warn('Frame vide — skip')
             return
+
+        # Conversion numpy → message ROS2 et publication sur /camera/image_raw
+        # → video_viewer_node (PC) affiche cette image en FPV
+        # → aruco_node (RPi) l'analysera pour détecter le tag ArUco
         msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'camera'

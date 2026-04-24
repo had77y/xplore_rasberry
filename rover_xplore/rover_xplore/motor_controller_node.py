@@ -1,3 +1,26 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FLUX DE DONNÉES
+#
+#   REÇOIT (1) : /rover/mode  (std_msgs/String)
+#                → envoyé par controller_node (PC)
+#                → si mode != "race" : stoppe immédiatement les moteurs
+#
+#   REÇOIT (2) : /rover/cmd_vel  (geometry_msgs/Twist)
+#                → envoyé par controller_node (PC) en mode race
+#                → linear.x  = vitesse avant/arrière (m/s)
+#                → angular.z = vitesse de rotation (rad/s)
+#
+#   ENVOIE     : commande serial "L<val> R<val>\n" vers l'Arduino
+#                → l'Arduino pilote les drivers moteur (PWM)
+#                → val = entier [-100, 100] = % de vitesse max
+#
+#   SÉCURITÉ   : si aucun cmd_vel reçu depuis 500ms → stoppe les moteurs
+#                (protège contre une perte de connexion réseau)
+#
+#   FUTUR      : quand encoder_node sera prêt, il publiera /wheel_odom
+#                → ce node activera le PID par roue (voir code commenté)
+# ──────────────────────────────────────────────────────────────────────────────
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -51,7 +74,9 @@ class MotorControllerNode(Node):
         self._connect_serial()
 
         # ── Subscribers ──────────────────────────────────────────────
+        # /rover/mode  → envoyé par controller_node (PC), gère le gating des moteurs
         self.create_subscription(String, '/rover/mode', self.mode_callback, 10)
+        # /rover/cmd_vel → envoyé par controller_node (PC) uniquement en mode race
         self.create_subscription(Twist, '/rover/cmd_vel', self.cmd_callback, 10)
 
         # ── Safety timeout ───────────────────────────────────────────
@@ -63,6 +88,8 @@ class MotorControllerNode(Node):
     # ── Mode ─────────────────────────────────────────────────────────
 
     def mode_callback(self, msg: String):
+        # Reçoit le mode depuis controller_node (PC)
+        # Si le rover sort du mode race → stoppe les moteurs immédiatement
         mode = msg.data
         if mode == self.current_mode:
             return
@@ -85,7 +112,12 @@ class MotorControllerNode(Node):
     # ── Callback commande ────────────────────────────────────────────
 
     def cmd_callback(self, msg: Twist):
-        """Reçoit Twist, convertit en vitesses roues, envoie à l'Arduino."""
+        """
+        Reçoit un Twist depuis controller_node (PC) via /rover/cmd_vel.
+        Convertit en vitesses roues via cinématique différentielle.
+        Envoie la commande à l'Arduino via serial.
+        """
+        # Gating : ignore les commandes si on n'est pas en mode race
         if self.current_mode != 'race':
             return
 
@@ -103,6 +135,7 @@ class MotorControllerNode(Node):
         # v_right = self._pid(v_right, self.speed_right, self.pid_right)
         # ────────────────────────────────────────────────────────────────
 
+        # Envoi à l'Arduino → drivers moteur → roues
         self._send_motors(v_left, v_right)
 
     # ── Envoi serial ─────────────────────────────────────────────────
@@ -111,6 +144,7 @@ class MotorControllerNode(Node):
         """
         Convertit les vitesses (m/s) en pourcentage [-100, 100] et envoie à l'Arduino.
         Format : "L<val> R<val>\n"  ex: "L50 R50\n", "L-30 R30\n"
+        L'Arduino interprète ce message et génère les signaux PWM pour les drivers moteur.
         """
         left_pct  = int(max(-100, min(100, (v_left  / self.MAX_SPEED_MS) * 100)))
         right_pct = int(max(-100, min(100, (v_right / self.MAX_SPEED_MS) * 100)))
@@ -159,7 +193,10 @@ class MotorControllerNode(Node):
     # ── Safety timeout ───────────────────────────────────────────────
 
     def check_timeout(self):
-        """Stoppe les moteurs si aucune commande reçue depuis TIMEOUT_SEC."""
+        """
+        Sécurité réseau : stoppe les moteurs si controller_node (PC) n'envoie plus
+        de cmd_vel depuis TIMEOUT_SEC secondes (ex: perte WiFi).
+        """
         elapsed = (self.get_clock().now() - self.last_msg_time).nanoseconds / 1e9
         if elapsed > self.TIMEOUT_SEC:
             self._send_motors(0.0, 0.0)
