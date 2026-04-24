@@ -2,22 +2,24 @@
 # FLUX DE DONNÉES
 #
 #   QUI ENVOIE  : camera_node (ce fichier) — tourne EN NATIF sur le Raspberry Pi
-#   CE QU'IL ENVOIE : une image BGR 640×480 @ 30 FPS
-#   TOPIC       : /camera/image_raw  (sensor_msgs/Image, encoding bgr8)
+#   CE QU'IL ENVOIE : une image JPEG compressée 640×480 @ 30 FPS (~1-2 MB/s)
+#   TOPIC       : /camera/image_compressed  (sensor_msgs/CompressedImage, jpeg)
 #
 #   QUI REÇOIT  :
 #     → video_viewer_node (PC)   — affiche le flux FPV en temps réel
-#     → aruco_node (RPi)         — détecte le tag ArUco pour la navigation autonome
+#     → aruco_node (RPi)         — détecte le tag ArUco (décode JPEG localement)
 #
 #   REMARQUE : ce node tourne HORS Docker (libcamera ne fonctionne pas dans Docker).
 #              Les autres nodes tournent dans Docker avec --net=host → ils voient
 #              ce topic automatiquement via ROS2 DDS.
+#              QoS BEST_EFFORT : les frames perdues sont ignorées (pas de retransmission)
+#              → évite l'accumulation de lag sur WiFi.
 # ──────────────────────────────────────────────────────────────────────────────
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from sensor_msgs.msg import CompressedImage
 import cv2
 
 try:
@@ -30,15 +32,21 @@ FRAME_W = 640
 FRAME_H = 480
 TARGET_FPS = 30
 WARMUP_FRAMES = TARGET_FPS  # ~1s de drain AEC/AWB
+JPEG_QUALITY = 80
+
+VIDEO_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 
 class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
-        self.bridge = CvBridge()
 
         # Publication des frames — reçues par video_viewer_node (PC) et aruco_node (RPi)
-        self.pub = self.create_publisher(Image, '/camera/image_raw', 10)
+        self.pub = self.create_publisher(CompressedImage, '/camera/image_compressed', VIDEO_QOS)
 
         libcamera_cameras = Picamera2.global_camera_info() if LIBCAMERA_AVAILABLE else []
         if libcamera_cameras:
@@ -52,9 +60,10 @@ class CameraNode(Node):
             self._init_v4l2()
 
         self.timer = self.create_timer(1.0 / TARGET_FPS, self.capture_and_publish)
-        backend = 'libcamera' if LIBCAMERA_AVAILABLE else 'V4L2'
+        backend = 'libcamera' if libcamera_cameras else 'V4L2'
         self.get_logger().info(
-            f'camera_node démarré — {backend} {FRAME_W}x{FRAME_H} @ {TARGET_FPS} FPS'
+            f'camera_node démarré — {backend} {FRAME_W}x{FRAME_H} @ {TARGET_FPS} FPS '
+            f'(JPEG q{JPEG_QUALITY}, BEST_EFFORT)'
         )
 
     # ------------------------------------------------------------------
@@ -114,12 +123,16 @@ class CameraNode(Node):
             self.get_logger().warn('Frame vide — skip')
             return
 
-        # Conversion numpy → message ROS2 et publication sur /camera/image_raw
-        # → video_viewer_node (PC) affiche cette image en FPV
-        # → aruco_node (RPi) l'analysera pour détecter le tag ArUco
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+        ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not ret:
+            self.get_logger().warn('Échec encodage JPEG — skip')
+            return
+
+        msg = CompressedImage()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'camera'
+        msg.format = 'jpeg'
+        msg.data = buf.tobytes()
         self.pub.publish(msg)
 
     # ------------------------------------------------------------------
