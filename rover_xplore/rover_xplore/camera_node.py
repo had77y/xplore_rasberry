@@ -75,7 +75,8 @@ class CameraNode(Node):
         self.cam = Picamera2()
         frame_duration_us = int(1_000_000 / TARGET_FPS)
         cfg = self.cam.create_video_configuration(
-            main={"size": (FRAME_W, FRAME_H), "format": "BGR888"},
+            # picamera2: "RGB888" => numpy en BGR (ordre attendu par OpenCV)
+            main={"size": (FRAME_W, FRAME_H), "format": "RGB888"},
             controls={"FrameDurationLimits": (frame_duration_us, frame_duration_us)},
         )
         self.cam.configure(cfg)
