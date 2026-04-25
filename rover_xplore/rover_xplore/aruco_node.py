@@ -49,8 +49,14 @@ class ArucoNode(Node):
             raise ValueError(f'Unknown ArUco dictionary: {dict_name}')
 
         dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
-        parameters = cv2.aruco.DetectorParameters()
-        self.detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+        # Supporte OpenCV >= 4.7 (ArucoDetector) et les versions antérieures
+        if hasattr(cv2.aruco, 'ArucoDetector'):
+            parameters = cv2.aruco.DetectorParameters()
+            self._detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+            self._detect_fn = lambda gray: self._detector.detectMarkers(gray)
+        else:
+            parameters = cv2.aruco.DetectorParameters_create()
+            self._detect_fn = lambda gray: cv2.aruco.detectMarkers(gray, dictionary, parameters=parameters)
 
         self.sub = self.create_subscription(
             Image, '/camera/image_raw', self._on_image, VIDEO_QOS
@@ -66,7 +72,7 @@ class ArucoNode(Node):
 
         frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = self.detector.detectMarkers(gray)
+        corners, ids, _ = self._detect_fn(gray)
 
         out = Float32MultiArray()
         if ids is None or len(ids) == 0:
