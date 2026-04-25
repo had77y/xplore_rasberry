@@ -1,29 +1,27 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# FLUX DE DONNÉES — DOUBLE PUBLICATION
+# FLUX DE DONNÉES — DOUBLE PUBLICATION, GÉRÉ PAR /rover/mode
 #
 #   QUI ENVOIE  : camera_node (ce fichier) — tourne EN NATIF sur le Raspberry Pi
 #   CE QU'IL ENVOIE :
-#     → /camera/image_raw         (sensor_msgs/Image, bgr8, 640×480 @ 30 FPS)
-#       Pour aruco_node (RPi) : qualité maximale, pas de pertes JPEG.
-#       Reste LOCAL au Pi (DDS shared-memory ou loopback) → pas sur le WiFi.
 #     → /camera/image_compressed  (sensor_msgs/CompressedImage, jpeg q80)
+#       Actif en modes : race, autonomous
 #       Pour video_viewer_node (PC) : ~1-2 MB/s sur le WiFi.
+#     → /camera/image_raw         (sensor_msgs/Image, bgr8, 640×480 @ 30 FPS)
+#       Actif uniquement si aruco_node est subscrit (mode autonomous)
+#       Pour aruco_node (RPi) : qualité maximale, reste local au Pi.
 #
-#   QUI REÇOIT  :
-#     → aruco_node (RPi)        — sub /camera/image_raw
-#     → video_viewer_node (PC)  — sub /camera/image_compressed
+#   MODE idle / arm → le node tourne mais ne publie rien (0% CPU caméra).
 #
 #   REMARQUE : ce node tourne HORS Docker (libcamera ne fonctionne pas dans Docker).
 #              Les autres nodes tournent dans Docker avec --net=host → ils voient
 #              ces topics automatiquement via ROS2 DDS.
-#              QoS BEST_EFFORT sur les deux topics : les frames perdues sont
-#              ignorées (pas de retransmission) → évite l'accumulation de lag.
 # ──────────────────────────────────────────────────────────────────────────────
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import CompressedImage, Image
+from std_msgs.msg import String
 import cv2
 
 try:
@@ -38,6 +36,8 @@ TARGET_FPS = 30
 WARMUP_FRAMES = TARGET_FPS  # ~1s de drain AEC/AWB
 JPEG_QUALITY = 80
 
+ACTIVE_MODES = {'race', 'autonomous'}
+
 VIDEO_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     history=HistoryPolicy.KEEP_LAST,
@@ -49,11 +49,11 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # Double publication :
-        #   - /camera/image_raw        → aruco_node (local Pi, qualité max)
-        #   - /camera/image_compressed → video_viewer_node (PC via WiFi, JPEG)
+        self._active = False  # publie seulement si mode race ou autonomous
+
         self.pub_raw = self.create_publisher(Image, '/camera/image_raw', VIDEO_QOS)
         self.pub_jpeg = self.create_publisher(CompressedImage, '/camera/image_compressed', VIDEO_QOS)
+        self.create_subscription(String, '/rover/mode', self._on_mode, 10)
 
         libcamera_cameras = Picamera2.global_camera_info() if LIBCAMERA_AVAILABLE else []
         if libcamera_cameras:
@@ -70,8 +70,20 @@ class CameraNode(Node):
         backend = 'libcamera' if libcamera_cameras else 'V4L2'
         self.get_logger().info(
             f'camera_node démarré — {backend} {FRAME_W}x{FRAME_H} @ {TARGET_FPS} FPS '
-            f'(JPEG q{JPEG_QUALITY}, BEST_EFFORT)'
+            f'(JPEG q{JPEG_QUALITY}) — en attente du mode...'
         )
+
+    # ------------------------------------------------------------------
+    # Mode
+    # ------------------------------------------------------------------
+
+    def _on_mode(self, msg: String):
+        was_active = self._active
+        self._active = msg.data in ACTIVE_MODES
+        if self._active and not was_active:
+            self.get_logger().info(f'Mode {msg.data} — caméra activée')
+        elif not self._active and was_active:
+            self.get_logger().info(f'Mode {msg.data} — caméra désactivée')
 
     # ------------------------------------------------------------------
     # Init backends
@@ -126,6 +138,9 @@ class CameraNode(Node):
     # ------------------------------------------------------------------
 
     def capture_and_publish(self):
+        if not self._active:
+            return
+
         frame = self.capture_fn()
         if frame is None:
             self.get_logger().warn('Frame vide — skip')
@@ -133,30 +148,30 @@ class CameraNode(Node):
 
         stamp = self.get_clock().now().to_msg()
 
-        # ── Publication RAW (bgr8) — pour aruco_node sur le Pi ──
-        raw = Image()
-        raw.header.stamp = stamp
-        raw.header.frame_id = 'camera'
-        raw.height = FRAME_H
-        raw.width = FRAME_W
-        raw.encoding = 'bgr8'
-        raw.is_bigendian = 0
-        raw.step = FRAME_W * 3
-        raw.data = frame.tobytes()
-        self.pub_raw.publish(raw)
-
-        # ── Publication JPEG — pour video_viewer_node sur le PC ──
+        # ── JPEG en premier — minimise la latence du viewer PC ──
         ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if not ret:
             self.get_logger().warn('Échec encodage JPEG — skip')
             return
-
         jpeg = CompressedImage()
         jpeg.header.stamp = stamp
         jpeg.header.frame_id = 'camera'
         jpeg.format = 'jpeg'
         jpeg.data = buf.tobytes()
         self.pub_jpeg.publish(jpeg)
+
+        # ── RAW (bgr8) — seulement si aruco_node est actif (mode autonomous) ──
+        if self.pub_raw.get_subscription_count() > 0:
+            raw = Image()
+            raw.header.stamp = stamp
+            raw.header.frame_id = 'camera'
+            raw.height = FRAME_H
+            raw.width = FRAME_W
+            raw.encoding = 'bgr8'
+            raw.is_bigendian = 0
+            raw.step = FRAME_W * 3
+            raw.data = frame.tobytes()
+            self.pub_raw.publish(raw)
 
     # ------------------------------------------------------------------
     # Cleanup
