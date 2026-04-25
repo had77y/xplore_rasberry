@@ -61,6 +61,9 @@ Démarrage
 |-------|------|-----------|-------------|
 | `/rover/mode` | `std_msgs/String` | PC → RPi | Mode actif : autonomous / race / arm / idle |
 | `/rover/cmd_vel` | `geometry_msgs/Twist` | PC → RPi | Commandes de déplacement |
+| `/camera/image_raw` | `sensor_msgs/Image` (bgr8) | RPi → RPi | Flux vidéo qualité max — pour aruco_node, reste local |
+| `/camera/image_compressed` | `sensor_msgs/CompressedImage` | RPi → PC | Flux vidéo JPEG, QoS BEST_EFFORT |
+| `/aruco_detected` | `std_msgs/Float32MultiArray` | RPi → RPi | `[found, id, cx, cy, area]` — marker le plus proche |
 
 ### Modes reconnus par mode_manager_node (RPi)
 | Mode | Action RPi |
@@ -234,7 +237,7 @@ VM/Mac — Docker
   └── video_viewer_node.py  ←  affiche le flux FPV
 ```
 
-### État déploiement Pi (2026-04-20)
+### État déploiement Pi (2026-04-25)
 
 | Composant | État |
 |-----------|------|
@@ -244,8 +247,8 @@ VM/Mac — Docker
 | libcamera (compilé depuis sources RPi) | ✅ Installé dans `/usr/local/lib` |
 | picamera2 | ✅ Installé (pip, patch pykms appliqué) |
 | colcon build rover_xplore | ✅ Fait — branche `feat/mode-selection` |
-| camera_node fonctionnel | ✅ Publie `/camera/image_raw` @ 640x480 30 FPS |
-| VM voit le topic `/camera/image_raw` | ✅ DDS fonctionne |
+| camera_node fonctionnel | ✅ Publie `/camera/image_compressed` (JPEG) @ 640x480 30 FPS |
+| VM voit le topic `/camera/image_compressed` | ✅ DDS fonctionne |
 
 ### Notes importantes post-install
 
@@ -259,12 +262,18 @@ VM/Mac — Docker
 source ~/.bashrc && source ~/dev_ws/install/setup.bash && ros2 run rover_xplore camera_node
 ```
 
-### Problème restant — viewer freeze
+### Fix freeze viewer (2026-04-25)
 
-Le `video_viewer_node` sur la VM freeze après ~1s. À investiguer :
-- Possible problème bande passante (640x480 BGR non compressé @ 30 FPS = ~27 MB/s)
-- Possible problème DDS QoS
-- Pi chauffe beaucoup — surveiller la température
+Deux causes identifiées et corrigées :
+1. **Bande passante** : BGR non compressé = 27 MB/s sur WiFi → saturait DDS UDP
+2. **QoS RELIABLE** : DDS retransmettait les paquets perdus → lag s'accumulait
+
+Fix appliqué dans les deux repos :
+- `camera_node` : publie `CompressedImage` JPEG (qualité 80) sur `/camera/image_compressed` → ~1-2 MB/s
+- `video_viewer_node` : subscribe en `CompressedImage` + `BEST_EFFORT` QoS (frames perdues ignorées, pas de retransmission)
+- `cv_bridge` retiré des deux nodes (non nécessaire avec JPEG natif cv2)
+
+À surveiller si freeze persiste : throttling thermique Pi, multicast DDS filtré par routeur.
 
 ### Dépendances RPi (natif)
 ```bash
@@ -279,13 +288,13 @@ pip3 install picamera2  # après libcamera compilé
 ### Repo Rover (`xplore_rasberry`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, BGR888 30 FPS, fallback V4L2 |
+| `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub Image bgr8 (`/camera/image_raw`) + CompressedImage JPEG (`/camera/image_compressed`), fallback V4L2, QoS BEST_EFFORT |
 | `scripts/start_camera.sh` | Prêt — lance camera_node natif sur le Pi hors Docker |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — gère autonomous/race/arm/idle |
 | `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — cinématique diff, serial Arduino, gating par mode, PID en commentaire |
+| `rover_xplore/rover_xplore/aruco_node.py` | Prêt — cv2.aruco sur `/camera/image_raw`, publie `/aruco_detected` (marker le plus proche), dict configurable |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
 | `rover_xplore/rover_xplore/autonomous_node.py` | À créer |
-| `rover_xplore/rover_xplore/aruco_node.py` | À créer |
 | `rover_xplore/rover_xplore/obstacle_avoidance_node.py` | À créer |
 | `rover_xplore/rover_xplore/ultrasonic_node.py` | À créer |
 | `rover_xplore/rover_xplore/imu_node.py` | À créer |
@@ -296,7 +305,7 @@ pip3 install picamera2  # après libcamera compilé
 | Fichier | État |
 |---------|------|
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Prêt — menu + race + bras |
-| `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Prêt — placeholder si pas de flux, fenêtre redimensionnable |
+| `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Prêt — CompressedImage JPEG, QoS BEST_EFFORT, placeholder si pas de flux |
 | `rover_xplore_pub/rover_xplore_pub/teleop_node.py` | Remplacé par controller_node |
 | `rover_xplore_pub/rover_xplore_pub/mode_selector_node.py` | Remplacé par controller_node |
 
@@ -320,4 +329,4 @@ pip3 install picamera2  # après libcamera compilé
 
 ---
 
-*Dernière mise à jour : 2026-04-18 (session 6)*
+*Dernière mise à jour : 2026-04-25 (session 8 — aruco_node + camera dual-pub)*

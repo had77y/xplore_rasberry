@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'camera_node = rover_xplore.camera_node:main',
+            'aruco_node = rover_xplore.aruco_node:main',
             'mode_manager_node = rover_xplore.mode_manager_node:main',
             'motor_controller_node = rover_xplore.motor_controller_node:main',
         ],

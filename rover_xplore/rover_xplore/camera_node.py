@@ -1,25 +1,29 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# FLUX DE DONNÉES
+# FLUX DE DONNÉES — DOUBLE PUBLICATION
 #
 #   QUI ENVOIE  : camera_node (ce fichier) — tourne EN NATIF sur le Raspberry Pi
-#   CE QU'IL ENVOIE : une image JPEG compressée 640×480 @ 30 FPS (~1-2 MB/s)
-#   TOPIC       : /camera/image_compressed  (sensor_msgs/CompressedImage, jpeg)
+#   CE QU'IL ENVOIE :
+#     → /camera/image_raw         (sensor_msgs/Image, bgr8, 640×480 @ 30 FPS)
+#       Pour aruco_node (RPi) : qualité maximale, pas de pertes JPEG.
+#       Reste LOCAL au Pi (DDS shared-memory ou loopback) → pas sur le WiFi.
+#     → /camera/image_compressed  (sensor_msgs/CompressedImage, jpeg q80)
+#       Pour video_viewer_node (PC) : ~1-2 MB/s sur le WiFi.
 #
 #   QUI REÇOIT  :
-#     → video_viewer_node (PC)   — affiche le flux FPV en temps réel
-#     → aruco_node (RPi)         — détecte le tag ArUco (décode JPEG localement)
+#     → aruco_node (RPi)        — sub /camera/image_raw
+#     → video_viewer_node (PC)  — sub /camera/image_compressed
 #
 #   REMARQUE : ce node tourne HORS Docker (libcamera ne fonctionne pas dans Docker).
 #              Les autres nodes tournent dans Docker avec --net=host → ils voient
-#              ce topic automatiquement via ROS2 DDS.
-#              QoS BEST_EFFORT : les frames perdues sont ignorées (pas de retransmission)
-#              → évite l'accumulation de lag sur WiFi.
+#              ces topics automatiquement via ROS2 DDS.
+#              QoS BEST_EFFORT sur les deux topics : les frames perdues sont
+#              ignorées (pas de retransmission) → évite l'accumulation de lag.
 # ──────────────────────────────────────────────────────────────────────────────
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 import cv2
 
 try:
@@ -45,8 +49,11 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # Publication des frames — reçues par video_viewer_node (PC) et aruco_node (RPi)
-        self.pub = self.create_publisher(CompressedImage, '/camera/image_compressed', VIDEO_QOS)
+        # Double publication :
+        #   - /camera/image_raw        → aruco_node (local Pi, qualité max)
+        #   - /camera/image_compressed → video_viewer_node (PC via WiFi, JPEG)
+        self.pub_raw = self.create_publisher(Image, '/camera/image_raw', VIDEO_QOS)
+        self.pub_jpeg = self.create_publisher(CompressedImage, '/camera/image_compressed', VIDEO_QOS)
 
         libcamera_cameras = Picamera2.global_camera_info() if LIBCAMERA_AVAILABLE else []
         if libcamera_cameras:
@@ -124,17 +131,32 @@ class CameraNode(Node):
             self.get_logger().warn('Frame vide — skip')
             return
 
+        stamp = self.get_clock().now().to_msg()
+
+        # ── Publication RAW (bgr8) — pour aruco_node sur le Pi ──
+        raw = Image()
+        raw.header.stamp = stamp
+        raw.header.frame_id = 'camera'
+        raw.height = FRAME_H
+        raw.width = FRAME_W
+        raw.encoding = 'bgr8'
+        raw.is_bigendian = 0
+        raw.step = FRAME_W * 3
+        raw.data = frame.tobytes()
+        self.pub_raw.publish(raw)
+
+        # ── Publication JPEG — pour video_viewer_node sur le PC ──
         ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if not ret:
             self.get_logger().warn('Échec encodage JPEG — skip')
             return
 
-        msg = CompressedImage()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'camera'
-        msg.format = 'jpeg'
-        msg.data = buf.tobytes()
-        self.pub.publish(msg)
+        jpeg = CompressedImage()
+        jpeg.header.stamp = stamp
+        jpeg.header.frame_id = 'camera'
+        jpeg.format = 'jpeg'
+        jpeg.data = buf.tobytes()
+        self.pub_jpeg.publish(jpeg)
 
     # ------------------------------------------------------------------
     # Cleanup
