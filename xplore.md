@@ -19,16 +19,43 @@ Communication : ROS2 DDS via réseau local (même subnet, ROS_DOMAIN_ID identiqu
 
 | Composant | Qté | Notes |
 |-----------|-----|-------|
-| Moteurs roues JGA25-370 (DC + encodeur) | 4 | encodeur 6 fils, quadrature A/B |
+| Moteurs roues JGA25-370 (DC + encodeur) | 4 | motor1..4 dans le protocole série |
+| Servos | 4 | servo_1..4 dans le protocole série |
+| Stepper | 1 | stepper dans le protocole série |
 | Moteurs bras robotisé | 5 | type à confirmer avec team élec |
 | Moteur benne (conteneur) | 1 | tilt pour vider |
 | Caméra Pi | 1 | libcamera (picamera2) natif Ubuntu 22 |
-| Capteurs ultrasoniques (US) | 5 (prévu) | 3 avant + 2 côtés à 45° |
-| IMU | 1 | fusion avec encodeurs via EKF |
+| Capteurs ultrasoniques (US) | 5 | distance_1..5 dans le protocole série |
+| IMU (accel + gyro) | 1 | accel_x/y/z + gyro_x/y/z dans le protocole série |
 | Raspberry Pi 4 | 1 | compute principal, ROS2 |
-| Arduino Nano | TBD | rôle à confirmer avec team élec |
+| Micro-contrôleur (équipe élec) | 1 | communication série binaire avec le Pi |
 
-> **À confirmer avec team élec :** type moteurs bras, type drivers, nb Arduino Nano, communication RPi↔Arduino (USB série ou I2C).
+---
+
+## Communication RPi ↔ Micro (protocole série binaire)
+
+Protocole défini avec l'équipe élec — structs binaires little-endian via UART/USB.
+
+### `data_from_rasberry` — Pi → Micro (18 octets)
+```c
+struct data_from_rasberry {
+    uint16_t servo_1, servo_2, servo_3, servo_4;   // 4 × uint16
+    int16_t  motor1_speed, motor2_speed, motor3_speed, motor4_speed;  // 4 × int16
+    int16_t  stepper;                               // 1 × int16
+};  // total : 18 octets, format Python : "<4H5h"
+```
+
+### `data_for_rasberry` — Micro → Pi (30 octets)
+```c
+struct data_for_rasberry {
+    uint16_t accel_x, accel_y, accel_z;            // IMU accéléromètre
+    uint16_t gyro_x, gyro_y, gyro_z;               // IMU gyroscope
+    int16_t  motor1_speed, motor2_speed, motor3_speed, motor4_speed;  // encodeurs roues
+    uint16_t distance_1, distance_2, distance_3, distance_4, distance_5;  // 5 US
+};  // total : 30 octets, format Python : "<6H4h5H"
+```
+
+> **À confirmer avec team élec :** disposition des 4 moteurs (gauche/droite ou avant/arrière), port série (`/dev/ttyUSB0`), baudrate.
 
 ---
 
@@ -87,6 +114,12 @@ Menu principal (souris)
 | `/camera/image_raw` | `sensor_msgs/Image` (bgr8) | RPi → RPi | Flux vidéo qualité max — pour aruco_node, reste local |
 | `/camera/image_compressed` | `sensor_msgs/CompressedImage` | RPi → PC | Flux vidéo JPEG, QoS BEST_EFFORT |
 | `/aruco_detected` | `std_msgs/Float32MultiArray` | RPi → RPi | `[found, id, cx, cy, area]` — marker le plus proche |
+| `/rover/nav_goal` | `std_msgs/Int32MultiArray` | PC → RPi | `[start_row, start_col, target_row, target_col]` — envoyé au Start |
+| `/rover/grid_state` | `std_msgs/Int32MultiArray` | RPi → PC | Grille 12×8 aplatie — états cases (0=UNDISCOVERED..4=BORDER) |
+| `/rover/grid_pos` | `std_msgs/Int32MultiArray` | RPi → PC | `[row, col]` — position courante du rover sur la grille |
+| `/ultrasonic` | `std_msgs/Float32MultiArray` | RPi → RPi | `[d1, d2, d3, d4, d5]` en cm — publié par serial_bridge_node |
+| `/imu/raw` | `sensor_msgs/Imu` | RPi → RPi | accel + gyro bruts — publié par serial_bridge_node |
+| `/wheel_encoders` | `std_msgs/Int32MultiArray` | RPi → RPi | `[m1, m2, m3, m4]` vitesses encodeurs — publié par serial_bridge_node |
 
 ### Modes reconnus par mode_manager_node (RPi)
 | Mode | Action RPi |
@@ -195,20 +228,42 @@ Pas besoin de coder le Kalman manuellement.
 - Chaque cellule divisée en **4 mini-cases 40×40cm** (TL/TR/BL/BR) pour la détection fine des obstacles
 - `AMBUSH` = cul-de-sac vécu : le rover y est entré et toutes les voisines étaient bloquées → évité à l'avenir
 
-### Algorithme de navigation
+### Algorithme de navigation (implémenté dans MapWidget + autonomous_node)
 
-Navigation **greedy par priorité** + **replanning A\*** si ≥ 3 AMBUSH consécutifs :
+**BFS global vers meilleure UNDISCOVERED** à chaque tick :
 
-1. Choisir la cellule voisine avec la priorité max, passage vérifié via mini-cases + US
-2. Pivoter 45° ou 90° (IMU) → avancer vers centre (encodeurs)
-3. Scanner US → mettre à jour grille
-4. Si toutes voisines bloquées → marquer `AMBUSH` → backtrack sur stack du chemin parcouru
-5. Après 3 AMBUSH consécutifs → A* sur grille courante → suivre chemin → reprendre greedy
+1. Depuis la position courante, BFS à travers les cases FREE pour trouver la case UNDISCOVERED avec la meilleure priorité (Chebyshev min vers cible) atteignable
+2. Si la meilleure est un voisin direct → move classique (1 step), case → FREE, push position au stack
+3. Si la meilleure est accessible via des cases FREE → **transit silencieux** : le rover repasse sur les cases déjà visitées (sans changer leur état) jusqu'à la UNDISCOVERED cible
+4. Si aucune UNDISCOVERED atteignable nulle part → marquer `AMBUSH` + backtrack via stack
+5. Déplacement réel : IMU pour cap → encodeurs pour distance → case mise à jour
+
+**Règles diagonale** : une diagonale (dr,dc) n'est autorisée que si les deux cases "coin" adjacentes `(cr, cc+dc)` et `(cr+dr, cc)` sont libres (non BORDER/OBSTACLE/AMBUSH).
+
+**Failles connues :**
+- Pas de condition d'arrêt si la cible est inatteignable (rover boucle en AMBUSH indéfiniment)
+- Pas de pondération distance de transit vs gain de priorité (long transit pour gain marginal)
+- Stack peut contenir des doublons (transits multiples depuis la même case)
+- Transit non invalidé si un obstacle est placé sur la destination pendant le transit
+
+### Architecture autonome — séparation PC / Rover
+
+**PC (rover_gui)** :
+- L'utilisateur place départ + arrivée sur la grille → appuie Start
+- Publie `/rover/nav_goal` → rover reçoit les coordonnées
+- Reçoit `/rover/grid_state` + `/rover/grid_pos` → affiche la grille en temps réel
+- Le PC est **uniquement un affichage**, il ne décide rien
+
+**Rover (autonomous_node)** :
+- Reçoit le goal, tourne l'algo BFS en local
+- US → cases OBSTACLE dans la grille interne
+- Encodeurs + IMU → position dans la grille (quelle case)
+- Publie la grille + sa position pour le PC
 
 ### Workflow autonome
 ```
 [1] DETECT_ARUCO   → caméra identifie la cible, confirme position dans grille
-[2] NAVIGATE_GRID  → algo greedy + A* (voir autonomous.md pour détails complets)
+[2] NAVIGATE_GRID  → algo BFS (voir section algorithme ci-dessus)
 [3] ARRIVE_ARUCO   → recalage position absolue, (Bonus) ramassage bouteille
 [4] NAVIGATE_RETURN → retour via grille déjà remplie + US double-check
 [5] ARRIVEE_BASE   → (Bonus) déposer bouteille → tilt benne
@@ -224,13 +279,11 @@ Navigation **greedy par priorité** + **replanning A\*** si ≥ 3 AMBUSH conséc
 | Détecter bord map | Cellules BORDER (software) — US non fiables sur barreaux |
 | Position bouteille | ArUco + offset x,y,z donné |
 
-### Nœuds autonomes à créer (RPi)
+### Nœuds à créer (RPi)
 | Nœud | Rôle |
 |------|------|
-| `ultrasonic_node` | publie distances 5 capteurs → `/us/distances` |
-| `encoder_node` | odométrie roues → `/wheel_odom` |
-| `imu_node` | données IMU → `/imu/data` |
-| `autonomous_node` | grille + algo greedy/A* + machine d'état 5 phases |
+| `serial_bridge_node` | pont binaire série ↔ ROS2 : reçoit struct 30 octets (IMU+encodeurs+US), publie `/ultrasonic` `/imu/raw` `/wheel_encoders` ; reçoit commandes moteurs/servos/stepper, envoie struct 18 octets |
+| `autonomous_node` | grille 12×8 + algo BFS + machine d'état — s'abonne à `/rover/nav_goal`, publie `/rover/grid_state` + `/rover/grid_pos` |
 
 ### Points à confirmer
 - Visibilité ArUco depuis le départ (change toute la stratégie si non)
@@ -325,20 +378,17 @@ pip3 install picamera2  # après libcamera compilé
 | `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub `/camera/image_raw` (Image bgr8) + `/camera/image_compressed` (JPEG), publie uniquement en mode `race` ou `autonomous`, fallback V4L2 |
 | `scripts/start_camera.sh` | Prêt — lance camera_node natif sur le Pi hors Docker |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — gère autonomous/race/arm/idle |
-| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — cinématique diff, serial Arduino, gating par mode, PID en commentaire |
+| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt (à refactoriser) — cinématique diff, serial texte `"L R\n"`, gating par mode, PID en commentaire. **À remplacer** par `serial_bridge_node` (protocole binaire struct) |
 | `rover_xplore/rover_xplore/aruco_node.py` | Prêt — cv2.aruco sur `/camera/image_raw`, publie `/aruco_detected` (marker le plus proche), s'active uniquement en mode `autonomous`, log sur transition détecté/perdu, dict configurable |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
-| `rover_xplore/rover_xplore/autonomous_node.py` | À créer |
-| `rover_xplore/rover_xplore/obstacle_avoidance_node.py` | À créer |
-| `rover_xplore/rover_xplore/ultrasonic_node.py` | À créer |
-| `rover_xplore/rover_xplore/imu_node.py` | À créer |
-| `rover_xplore/rover_xplore/encoder_node.py` | À créer |
+| `rover_xplore/rover_xplore/serial_bridge_node.py` | À créer — protocole binaire struct Pi↔Micro |
+| `rover_xplore/rover_xplore/autonomous_node.py` | À créer — grille BFS + machine à états, s'abonne `/rover/nav_goal`, publie `/rover/grid_state` + `/rover/grid_pos` |
 | `rover_xplore/rover_xplore/arm_node.py` | À créer |
 
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. Palette bleu marine #0C1427. **Animations vivantes** : `GlowCard` (bordure respirante, cycle 4 s, décalages de phase) sur toutes les cartes ; `GlowButton` bordeaux sur boutons d'action, cyan sur boutons retour. **Mode autonome** : layout 2 colonnes — gauche : carte navigation grille 20×14 (MapWidget QPainter + scan sonar horizontal) ; droite : ArUco (status + historique) + miniature caméra expandable (clic → overlay plein-écran avec ✕) + US sensors 5 cellules FL/FC/FR/L/R (placeholder) + IMU Ax/Ay/Az/Yaw (placeholder). **Touche M** retour menu depuis toutes les pages. Navigation : Race/Bras → sous-menu Téléop → Menu principal. |
+| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8 interactive, placement manuel départ/cible/obstacles (bouton OBSTACLE sticky, toggle), navigation simulée avec algo BFS global (transit via cases FREE vers meilleure UNDISCOVERED). **Architecture cible** : Start → publie `/rover/nav_goal`, affiche grille reçue depuis `/rover/grid_state` + position depuis `/rover/grid_pos` (à implémenter). **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. |
 | `rover_xplore_pub/rover_xplore_pub/xplore_logo.jpg` | Logo EPFL XPlore intégré dans la GUI (format paysage, fond #0C1427) |
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Fallback terminal — toujours dispo (`ros2 run rover_xplore_pub controller_node`) |
 | `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Fallback terminal — toujours dispo |
@@ -386,4 +436,4 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 
 ---
 
-*Dernière mise à jour : 2026-05-01 (session 12 — page bras : labels axes renommés UP/DOWN / CLOSE/OPEN / FLIP/UNFLIP, raccourcis supprimés, carrés réduits ; page race : séparateurs de sections ajoutés)*
+*Dernière mise à jour : 2026-05-02 (session 13 — protocole série binaire équipe élec, architecture autonome PC/Rover clarifiée, algo navigation BFS global avec transit FREE, MapWidget : obstacles manuels + fixes navigation)*
