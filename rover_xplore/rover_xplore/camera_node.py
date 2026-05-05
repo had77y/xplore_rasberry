@@ -4,7 +4,7 @@
 #   QUI ENVOIE  : camera_node (ce fichier) — tourne EN NATIF sur le Raspberry Pi
 #   CE QU'IL ENVOIE :
 #     → /camera/image_compressed  (sensor_msgs/CompressedImage, jpeg q80)
-#       Actif en modes : race, autonomous
+#       Actif en modes : race, autonomous, arm
 #       Pour video_viewer_node (PC) : ~1-2 MB/s sur le WiFi.
 #     → /camera/image_raw         (sensor_msgs/Image, bgr8, 640×480 @ 30 FPS)
 #       Actif uniquement si aruco_node est subscrit (mode autonomous)
@@ -36,7 +36,7 @@ TARGET_FPS = 30
 WARMUP_FRAMES = TARGET_FPS  # ~1s de drain AEC/AWB
 JPEG_QUALITY = 80
 
-ACTIVE_MODES = {'race', 'autonomous'}
+ACTIVE_MODES = {'race', 'autonomous', 'arm'}
 
 VIDEO_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
