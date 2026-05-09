@@ -48,12 +48,12 @@ class ArmNode(Node):
         prev = self._current_mode
         self._current_mode = msg.data
 
-        # Sortie du mode arm → zeros immédiats
-        if prev == 'arm' and msg.data != 'arm':
+        # Sortie des modes actifs → zeros immédiats
+        if prev in ('arm', 'autonomous') and msg.data not in ('arm', 'autonomous'):
             self._publish(0, 0, 0, 0, 0)
 
     def _arm_cmd_cb(self, msg: Float32MultiArray):
-        if self._current_mode != 'arm':
+        if self._current_mode not in ('arm', 'autonomous'):
             return
         if len(msg.data) < 6:
             return
