@@ -1,83 +1,102 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# arm_node.py — Raspberry Pi
+# arm_node.py — Raspberry Pi  (LifecycleNode)
 #
-# RÔLE : recevoir les commandes bras depuis le PC et les convertir en
-#         commandes servo/stepper pour serial_bridge_node.
+# RÔLE : convertir les commandes bras reçues du PC en valeurs servo/stepper
+#         et les publier sur /rover/arm_serial_cmd pour serial_bridge_node.
+#
+# CYCLE DE VIE (géré par mode_manager_node) :
+#   on_configure  → crée le publisher /rover/arm_serial_cmd
+#   on_activate   → s'abonne à /rover/arm_cmd
+#   on_deactivate → publie zeros, détruit subscription
+#   on_cleanup    → détruit le publisher
 #
 # MAPPING arm_cmd → struct Arduino :
-#   z   × speed → stepper   (axe Z bras, up/down)           [-100..100]
-#   y   × speed → servo_1   (flip/unflip)                   [-100..100]
-#   pince × speed → servo_2 = servo_3  (open/close pinces)  [-100..100]
-#   bin_dir × speed → servo_4  (benne haut/bas)             [-100..100]
-#   dump > 0.5  → servo_4 = 100 (position de vidage complète)
+#   z     × speed → stepper   (axe Z, up/down)              [-100..100]
+#   y     × speed → servo_1   (flip/unflip)                  [-100..100]
+#   pince × speed → servo_2 = servo_3  (open/close pinces)   [-100..100]
+#   bin_dir × speed → servo_4  (benne haut/bas)              [-100..100]
+#   dump > 0.5  → servo_4 = 100  (position de vidage forcée)
 #
-# TOPICS ÉCOUTÉS :
-#   /rover/arm_cmd  Float32MultiArray [z, y, pince, speed, dump, bin_dir]
-#   /rover/mode     String — gating, actif uniquement en mode 'arm'
+# TOPICS ÉCOUTÉS (uniquement en Active) :
+#   /rover/arm_cmd  std_msgs/Float32MultiArray  [z, y, pince, speed, dump, bin_dir]
 #
 # TOPICS PUBLIÉS :
-#   /rover/arm_serial_cmd  Int32MultiArray [servo1, servo2, servo3, servo4, stepper]
+#   /rover/arm_serial_cmd  std_msgs/Int32MultiArray  [s1, s2, s3, s4, stepper]
 # ══════════════════════════════════════════════════════════════════════════════
 
 import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray, Int32MultiArray, String
+from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
+from std_msgs.msg import Float32MultiArray, Int32MultiArray
 
 
-def _clamp(v, lo, hi):
+def _clamp(v: float, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(round(v))))
 
 
-class ArmNode(Node):
+class ArmNode(LifecycleNode):
 
     def __init__(self):
         super().__init__('arm_node')
 
-        self._current_mode = 'idle'
+        self._pub         = None
+        self._sub_arm_cmd = None
 
-        self.create_subscription(Float32MultiArray, '/rover/arm_cmd', self._arm_cmd_cb, 10)
-        self.create_subscription(String,            '/rover/mode',    self._mode_cb,    10)
+    # ── Lifecycle callbacks ───────────────────────────────────────────────────
 
+    def on_configure(self, state):
         self._pub = self.create_publisher(Int32MultiArray, '/rover/arm_serial_cmd', 10)
+        self.get_logger().info('arm_node configuré')
+        return TransitionCallbackReturn.SUCCESS
 
-        self.get_logger().info('arm_node démarré')
+    def on_activate(self, state):
+        self._sub_arm_cmd = self.create_subscription(
+            Float32MultiArray, '/rover/arm_cmd', self._arm_cmd_cb, 10
+        )
+        self.get_logger().info('arm_node actif')
+        return TransitionCallbackReturn.SUCCESS
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
+    def on_deactivate(self, state):
+        if self._sub_arm_cmd is not None:
+            self.destroy_subscription(self._sub_arm_cmd)
+            self._sub_arm_cmd = None
 
-    def _mode_cb(self, msg: String):
-        prev = self._current_mode
-        self._current_mode = msg.data
+        self._publish(0, 0, 0, 0, 0)
+        self.get_logger().info('arm_node inactif — bras stoppé')
+        return TransitionCallbackReturn.SUCCESS
 
-        # Sortie des modes actifs → zeros immédiats
-        if prev in ('arm', 'autonomous') and msg.data not in ('arm', 'autonomous'):
-            self._publish(0, 0, 0, 0, 0)
+    def on_cleanup(self, state):
+        if self._pub is not None:
+            self.destroy_publisher(self._pub)
+            self._pub = None
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_shutdown(self, state):
+        self._publish(0, 0, 0, 0, 0)
+        return TransitionCallbackReturn.SUCCESS
+
+    # ── Traitement arm_cmd ────────────────────────────────────────────────────
 
     def _arm_cmd_cb(self, msg: Float32MultiArray):
-        if self._current_mode not in ('arm', 'autonomous'):
-            return
         if len(msg.data) < 6:
             return
 
         z, y, pince, speed, dump, bin_dir = msg.data[:6]
 
         stepper = _clamp(z     * speed * 100.0, -100, 100)
-        s1      = _clamp(y     * speed * 100.0, -100, 100)  # flip/unflip
-        s23     = _clamp(pince * speed * 100.0, -100, 100)  # open/close (gauche = droite)
-
-        # Benne : position de vidage prioritaire sur la direction normale
-        if dump > 0.5:
-            s4 = 100
-        else:
-            s4 = _clamp(bin_dir * speed * 100.0, -100, 100)
+        s1      = _clamp(y     * speed * 100.0, -100, 100)
+        s23     = _clamp(pince * speed * 100.0, -100, 100)
+        s4      = 100 if dump > 0.5 else _clamp(bin_dir * speed * 100.0, -100, 100)
 
         self._publish(s1, s23, s23, s4, stepper)
 
     # ── Publication ───────────────────────────────────────────────────────────
 
-    def _publish(self, s1, s2, s3, s4, stepper):
-        out = Int32MultiArray()
-        out.data = [s1, s2, s3, s4, stepper]
-        self._pub.publish(out)
+    def _publish(self, s1: int, s2: int, s3: int, s4: int, stepper: int):
+        if self._pub is None:
+            return
+        msg = Int32MultiArray()
+        msg.data = [s1, s2, s3, s4, stepper]
+        self._pub.publish(msg)
 
 
 def main(args=None):
