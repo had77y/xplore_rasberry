@@ -459,4 +459,17 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 
 ---
 
+---
+
+## Points d'amélioration à traiter plus tard
+
+| # | Fichier | Problème | Fix |
+|---|---------|----------|-----|
+| 1 | `serial_bridge_node` | Pas de framing serial avec l'Arduino — si l'Arduino reboot ou envoie des données corrompues, la struct peut être décodée n'importe comment | Ajouter un byte de début de trame côté Arduino + vérification côté Pi (à coordonner avec l'équipe élec) |
+| 2 | `mode_manager_node` | `time.sleep(2.0)` au démarrage avant de configurer les nodes lifecycle — fragile si le système est lent | Remplacer par une boucle de polling qui vérifie la disponibilité des services sans sleep fixe |
+| 3 | `camera_node` | Gère son mode en interne (subscribe à `/rover/mode`) alors que tous les autres sont lifecycle — incohérence architecturale | Réécrire en LifecycleNode quand libcamera sera mieux maîtrisé |
+| 4 | Tous | Zéro tests automatisés | Ajouter des tests unitaires sur la cinématique diff, le mapping arm, le packing/unpacking de la struct serial |
+
+---
+
 *Dernière mise à jour : 2026-05-10 (session 15 — architecture lifecycle complète : motor_controller/arm/aruco en LifecycleNode, mode_manager orchestrateur avec queue anti-race, serial_bridge alignement trames + reconnexion USB, zeros garantis Ctrl+C, launch file rover.launch.py)*
