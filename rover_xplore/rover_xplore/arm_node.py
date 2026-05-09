@@ -74,6 +74,11 @@ class ArmNode(LifecycleNode):
         self._publish(0, 0, 0, 0, 0)
         return TransitionCallbackReturn.SUCCESS
 
+    def destroy_node(self):
+        # Appelé lors d'un Ctrl+C — on_shutdown n'est pas déclenché automatiquement
+        self._publish(0, 0, 0, 0, 0)
+        super().destroy_node()
+
     # ── Traitement arm_cmd ────────────────────────────────────────────────────
 
     def _arm_cmd_cb(self, msg: Float32MultiArray):

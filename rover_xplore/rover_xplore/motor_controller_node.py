@@ -91,9 +91,13 @@ class MotorControllerNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def on_shutdown(self, state):
-        # Dernière sécurité avant extinction
         self._publish_speeds(0.0, 0.0)
         return TransitionCallbackReturn.SUCCESS
+
+    def destroy_node(self):
+        # Appelé lors d'un Ctrl+C — on_shutdown n'est pas déclenché automatiquement
+        self._publish_speeds(0.0, 0.0)
+        super().destroy_node()
 
     # ── Traitement cmd_vel ────────────────────────────────────────────────────
 

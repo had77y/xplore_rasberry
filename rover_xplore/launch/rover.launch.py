@@ -45,13 +45,9 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # Caméra — actif en race / arm / autonomous
-        # Note : à lancer nativement hors Docker si picamera2 est utilisé
-        Node(
-            package='rover_xplore',
-            executable='camera_node',
-            name='camera_node',
-            output='screen',
-        ),
+        # camera_node est intentionnellement absent de ce launch file.
+        # Il doit tourner NATIVEMENT sur le Pi (hors Docker) car libcamera
+        # n'est pas accessible depuis un container.
+        # Commande : ros2 run rover_xplore camera_node
 
     ])

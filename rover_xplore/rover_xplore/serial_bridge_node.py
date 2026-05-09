@@ -90,10 +90,12 @@ class SerialBridgeNode(Node):
     def _connect_serial(self):
         try:
             self._ser = serial.Serial(self.SERIAL_PORT, self.BAUD_RATE, timeout=0.05)
+            # Vider le buffer à l'ouverture pour démarrer aligné sur une trame propre
+            self._ser.reset_input_buffer()
             self.get_logger().info(f'Serial ouvert : {self.SERIAL_PORT} @ {self.BAUD_RATE}')
         except serial.SerialException as e:
             self._ser = None
-            self.get_logger().warn(f'Serial indisponible ({e}) — mode log uniquement')
+            self.get_logger().warn(f'Serial indisponible ({e}) — tentative de reconnexion...')
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -110,6 +112,9 @@ class SerialBridgeNode(Node):
     # ── Tick 10 Hz ────────────────────────────────────────────────────────────
 
     def _tick(self):
+        if self._ser is None:
+            self._try_reconnect()
+            return
         self._apply_motor_timeout()
         self._send_struct()
         self._recv_struct()
@@ -119,6 +124,11 @@ class SerialBridgeNode(Node):
         if elapsed > MOTOR_TIMEOUT_S and any(v != 0 for v in self._motors):
             self._motors = [0, 0, 0, 0]
             self.get_logger().warn('Timeout motor_cmd — moteurs forcés à zéro')
+
+    def _try_reconnect(self):
+        """Tente de rouvrir le port série après une déconnexion."""
+        self.get_logger().info('Tentative de reconnexion serial...')
+        self._connect_serial()
 
     # ── Envoi struct Pi → Micro ───────────────────────────────────────────────
 
@@ -153,14 +163,17 @@ class SerialBridgeNode(Node):
             if available < _SIZE_RECV:
                 return
 
-            # Si plusieurs frames accumulées → prendre la plus récente
-            if available > _SIZE_RECV:
-                skip = available - (available % _SIZE_RECV)
-                self._ser.read(skip - _SIZE_RECV)
-
-            raw = self._ser.read(_SIZE_RECV)
-            if len(raw) < _SIZE_RECV:
+            # Lire TOUT le buffer d'un seul appel pour éviter les trames partielles
+            # qui resteraient en attente et corrompent les lectures suivantes.
+            all_data = self._ser.read(available)
+            n_complete = len(all_data) // _SIZE_RECV
+            if n_complete == 0:
                 return
+
+            # Prendre la dernière trame complète (la plus récente).
+            # Les octets partiels en fin de buffer sont consommés et jetés —
+            # le prochain appel lira uniquement de nouvelles données de l'Arduino.
+            raw = all_data[(n_complete - 1) * _SIZE_RECV : n_complete * _SIZE_RECV]
 
             vals                   = struct.unpack(_FMT_RECV, raw)
             ax, ay, az, gx, gy, gz = vals[0:6]

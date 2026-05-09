@@ -27,6 +27,7 @@
 #   Garantit qu'aucun acteur non voulu ne reste actif pendant le changement.
 # ══════════════════════════════════════════════════════════════════════════════
 
+import queue
 import threading
 import time
 
@@ -59,16 +60,19 @@ class ModeManagerNode(Node):
         super().__init__('mode_manager_node')
 
         self._current_mode: str | None = None
-        # Suivi de l'état actif de chaque node géré
         self._node_active: dict[str, bool] = {n: False for n in _MANAGED_NODES}
-        # Lock pour sérialiser les transitions (évite les changements de mode concurrents)
-        self._transition_lock = threading.Lock()
 
         # Clients pour les services lifecycle de chaque node géré
         self._lc_clients: dict[str, ChangeState.Client] = {
             name: self.create_client(ChangeState, f'/{name}/change_state')
             for name in _MANAGED_NODES
         }
+
+        # Queue de modes + thread worker unique : garantit que le DERNIER mode
+        # demandé est toujours celui appliqué, sans race condition.
+        self._mode_queue: queue.Queue[str] = queue.Queue()
+        self._worker = threading.Thread(target=self._mode_worker, daemon=True)
+        self._worker.start()
 
         self.create_subscription(String, '/rover/mode', self._mode_cb, 10)
 
@@ -120,9 +124,23 @@ class ModeManagerNode(Node):
         if mode == self._current_mode:
             return
 
-        self.get_logger().info(f'Changement de mode : {self._current_mode!r} → {mode!r}')
-        # Transition dans un thread séparé pour ne pas bloquer le callback ROS2
-        threading.Thread(target=self._apply_mode, args=(mode,), daemon=True).start()
+        # On pousse dans la queue — le worker prend le dernier mode demandé
+        self._mode_queue.put(mode)
+
+    # ── Worker thread unique ──────────────────────────────────────────────────
+
+    def _mode_worker(self):
+        """
+        Thread unique qui consomme la queue de modes.
+        Si plusieurs modes sont en attente, seul le dernier est appliqué —
+        élimine toute race condition entre changements rapides de mode.
+        """
+        while True:
+            mode = self._mode_queue.get()
+            # Vider la queue et garder uniquement le mode le plus récent
+            while not self._mode_queue.empty():
+                mode = self._mode_queue.get()
+            self._apply_mode(mode)
 
     # ── Application du mode ───────────────────────────────────────────────────
 
@@ -134,6 +152,7 @@ class ModeManagerNode(Node):
                 activations ensuite.
         """
         with self._transition_lock:
+            self.get_logger().info(f'Changement de mode : {self._current_mode!r} → {mode!r}')
             target = _MODE_MAP[mode]
 
             # 1. Désactiver ce qui ne doit pas tourner
