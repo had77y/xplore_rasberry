@@ -43,7 +43,7 @@ class MotorControllerNode(Node):
     TIMEOUT_SEC  = 0.5    # s — stop si pas de cmd_vel reçu depuis ce délai
 
     # Modes qui autorisent les moteurs de déplacement
-    ACTIVE_MODES = {'race', 'autonomous'}
+    ACTIVE_MODES = {'race', 'autonomous', 'arm'}
 
     def __init__(self):
         super().__init__('motor_controller_node')
