@@ -41,7 +41,6 @@ import serial
 
 _FMT_SEND  = '<4H5h'    # 18 octets
 _FMT_RECV  = '<6H4h5H'  # 30 octets
-_SIZE_SEND = struct.calcsize(_FMT_SEND)
 _SIZE_RECV = struct.calcsize(_FMT_RECV)
 
 MOTOR_TIMEOUT_S = 1.0   # sécurité : zéro moteurs si plus de commande depuis 1s
