@@ -372,18 +372,41 @@ pip3 install picamera2  # après libcamera compilé
 
 ## État du code
 
+### Architecture lifecycle (RPi)
+
+| Node | Type | Actif en |
+|------|------|----------|
+| `mode_manager_node` | Node (orchestrateur) | toujours |
+| `serial_bridge_node` | Node (hardware owner) | toujours |
+| `motor_controller_node` | **LifecycleNode** | race / arm / autonomous |
+| `arm_node` | **LifecycleNode** | arm / autonomous |
+| `aruco_node` | **LifecycleNode** | autonomous |
+| `camera_node` | Node (natif hors Docker) | race / arm / autonomous (auto-géré) |
+
+`mode_manager_node` orchestre les transitions lifecycle via les services ROS2 (`/<node>/change_state`). Aucun node géré ne connaît le mode — seul mode_manager décide qui tourne.
+
+### Lancer le rover
+
+```bash
+# Terminal 1 — natif (hors Docker) — caméra Pi
+ros2 run rover_xplore camera_node
+
+# Terminal 2 — dans Docker — tous les autres nodes
+ros2 launch rover_xplore rover.launch.py
+```
+
 ### Repo Rover (`xplore_rasberry`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub `/camera/image_raw` (Image bgr8) + `/camera/image_compressed` (JPEG), publie uniquement en mode `race` ou `autonomous`, fallback V4L2 |
-| `scripts/start_camera.sh` | Prêt — lance camera_node natif sur le Pi hors Docker |
-| `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — gère autonomous/race/arm/idle |
-| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — cinématique diff, publie `/rover/motor_cmd` Int32MultiArray [FR,FL,BR,BL] (-255..255), gating race/autonomous, timeout 500ms. Serial retiré. |
-| `rover_xplore/rover_xplore/aruco_node.py` | Prêt — cv2.aruco sur `/camera/image_raw`, publie `/aruco_detected` (marker le plus proche), s'active uniquement en mode `autonomous`, log sur transition détecté/perdu, dict configurable |
-| `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
-| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz, envoi struct 18B (4×uint16 servo + 4×int16 motor + int16 stepper), réception struct 30B (IMU+enc+US), publie /ultrasonic /imu/raw /wheel_encoders, force zeros en idle |
-| `rover_xplore/rover_xplore/arm_node.py` | Prêt — reçoit /rover/arm_cmd Float32[z,y,pince,speed,dump,bin_dir], mappe stepper/servo1..4, publie /rover/arm_serial_cmd Int32[s1,s2,s3,s4,stepper], gating mode arm |
+| `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub `/camera/image_raw` (bgr8, pour aruco) + `/camera/image_compressed` (JPEG, pour FPV), fallback V4L2. **Lance nativement hors Docker.** |
+| `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — orchestrateur lifecycle. Queue + worker thread unique (pas de race condition). Configure les nodes au démarrage, active/désactive selon le mode reçu sur `/rover/mode`. |
+| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — LifecycleNode. Cinématique diff → `/rover/motor_cmd` Int32[FR,FL,BR,BL] (-255..255). Timeout 500ms. Zeros garantis à Ctrl+C. |
+| `rover_xplore/rover_xplore/arm_node.py` | Prêt — LifecycleNode. Reçoit `/rover/arm_cmd` Float32[z,y,pince,speed,dump,bin_dir] → `/rover/arm_serial_cmd` Int32[s1,s2,s3,s4,stepper]. Zeros garantis à Ctrl+C. |
+| `rover_xplore/rover_xplore/aruco_node.py` | Prêt — LifecycleNode. Détection ArUco sur `/camera/image_raw` (bgr8 non compressé). Publie `/aruco_detected` Float32[found,id,cx,cy,area]. |
+| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. Envoi struct 18B, réception struct 30B. Lecture buffer entier par tick (pas de corruption de trame). Reconnexion automatique si USB se débranche. Timeout 1s sécurité moteurs. |
+| `rover_xplore/launch/rover.launch.py` | Prêt — lance tous les nodes sauf camera_node (natif). |
 | `rover_xplore/rover_xplore/autonomous_node.py` | À créer — grille BFS + machine à états, s'abonne `/rover/nav_goal`, publie `/rover/grid_state` + `/rover/grid_pos` |
+| `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
 
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
@@ -436,4 +459,4 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 
 ---
 
-*Dernière mise à jour : 2026-05-09 (session 14 — serial_bridge_node + arm_node créés, motor_controller_node refactorisé : serial texte retiré, 4 moteurs [-255..255], publie /rover/motor_cmd)*
+*Dernière mise à jour : 2026-05-10 (session 15 — architecture lifecycle complète : motor_controller/arm/aruco en LifecycleNode, mode_manager orchestrateur avec queue anti-race, serial_bridge alignement trames + reconnexion USB, zeros garantis Ctrl+C, launch file rover.launch.py)*
