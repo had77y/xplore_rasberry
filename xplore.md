@@ -378,12 +378,12 @@ pip3 install picamera2  # après libcamera compilé
 | `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub `/camera/image_raw` (Image bgr8) + `/camera/image_compressed` (JPEG), publie uniquement en mode `race` ou `autonomous`, fallback V4L2 |
 | `scripts/start_camera.sh` | Prêt — lance camera_node natif sur le Pi hors Docker |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — gère autonomous/race/arm/idle |
-| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt (à refactoriser) — cinématique diff, serial texte `"L R\n"`, gating par mode, PID en commentaire. **À remplacer** par `serial_bridge_node` (protocole binaire struct) |
+| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — cinématique diff, publie `/rover/motor_cmd` Int32MultiArray [FR,FL,BR,BL] (-255..255), gating race/autonomous, timeout 500ms. Serial retiré. |
 | `rover_xplore/rover_xplore/aruco_node.py` | Prêt — cv2.aruco sur `/camera/image_raw`, publie `/aruco_detected` (marker le plus proche), s'active uniquement en mode `autonomous`, log sur transition détecté/perdu, dict configurable |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
-| `rover_xplore/rover_xplore/serial_bridge_node.py` | À créer — protocole binaire struct Pi↔Micro |
+| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz, envoi struct 18B (4×uint16 servo + 4×int16 motor + int16 stepper), réception struct 30B (IMU+enc+US), publie /ultrasonic /imu/raw /wheel_encoders, force zeros en idle |
+| `rover_xplore/rover_xplore/arm_node.py` | Prêt — reçoit /rover/arm_cmd Float32[z,y,pince,speed,dump,bin_dir], mappe stepper/servo1..4, publie /rover/arm_serial_cmd Int32[s1,s2,s3,s4,stepper], gating mode arm |
 | `rover_xplore/rover_xplore/autonomous_node.py` | À créer — grille BFS + machine à états, s'abonne `/rover/nav_goal`, publie `/rover/grid_state` + `/rover/grid_pos` |
-| `rover_xplore/rover_xplore/arm_node.py` | À créer |
 
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
@@ -436,4 +436,4 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 
 ---
 
-*Dernière mise à jour : 2026-05-02 (session 13 — protocole série binaire équipe élec, architecture autonome PC/Rover clarifiée, algo navigation BFS global avec transit FREE, MapWidget : obstacles manuels + fixes navigation)*
+*Dernière mise à jour : 2026-05-09 (session 14 — serial_bridge_node + arm_node créés, motor_controller_node refactorisé : serial texte retiré, 4 moteurs [-255..255], publie /rover/motor_cmd)*

@@ -24,6 +24,8 @@ setup(
             'aruco_node = rover_xplore.aruco_node:main',
             'mode_manager_node = rover_xplore.mode_manager_node:main',
             'motor_controller_node = rover_xplore.motor_controller_node:main',
+            'serial_bridge_node = rover_xplore.serial_bridge_node:main',
+            'arm_node = rover_xplore.arm_node:main',
         ],
     },
 )
