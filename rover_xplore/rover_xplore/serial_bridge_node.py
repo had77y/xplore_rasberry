@@ -72,6 +72,7 @@ class SerialBridgeNode(Node):
         self._last_motor_time = self.get_clock().now()
 
         self._ser = None
+        self._reconnect_ticks = 0
         self._connect_serial()
 
         self.create_subscription(Int32MultiArray, '/rover/motor_cmd',      self._motor_cb, 10)
@@ -93,9 +94,8 @@ class SerialBridgeNode(Node):
             # Vider le buffer à l'ouverture pour démarrer aligné sur une trame propre
             self._ser.reset_input_buffer()
             self.get_logger().info(f'Serial ouvert : {self.SERIAL_PORT} @ {self.BAUD_RATE}')
-        except serial.SerialException as e:
+        except serial.SerialException:
             self._ser = None
-            self.get_logger().warn(f'Serial indisponible ({e}) — tentative de reconnexion...')
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -127,7 +127,9 @@ class SerialBridgeNode(Node):
 
     def _try_reconnect(self):
         """Tente de rouvrir le port série après une déconnexion."""
-        self.get_logger().info('Tentative de reconnexion serial...')
+        self._reconnect_ticks += 1
+        if self._reconnect_ticks % 50 == 1:  # log toutes les 5s (50 ticks × 100ms)
+            self.get_logger().warn('Serial indisponible — tentative de reconnexion...')
         self._connect_serial()
 
     # ── Envoi struct Pi → Micro ───────────────────────────────────────────────
@@ -223,7 +225,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

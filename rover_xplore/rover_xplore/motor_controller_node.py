@@ -95,8 +95,10 @@ class MotorControllerNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def destroy_node(self):
-        # Appelé lors d'un Ctrl+C — on_shutdown n'est pas déclenché automatiquement
-        self._publish_speeds(0.0, 0.0)
+        try:
+            self._publish_speeds(0.0, 0.0)
+        except Exception:
+            pass
         super().destroy_node()
 
     # ── Traitement cmd_vel ────────────────────────────────────────────────────
@@ -138,7 +140,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
