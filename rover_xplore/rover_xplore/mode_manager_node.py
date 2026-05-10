@@ -71,6 +71,7 @@ class ModeManagerNode(Node):
         # Queue de modes + thread worker unique : garantit que le DERNIER mode
         # demandé est toujours celui appliqué, sans race condition.
         self._mode_queue: queue.Queue[str] = queue.Queue()
+        self._transition_lock = threading.Lock()
         self._worker = threading.Thread(target=self._mode_worker, daemon=True)
         self._worker.start()
 
