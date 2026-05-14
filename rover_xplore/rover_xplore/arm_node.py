@@ -33,6 +33,10 @@ def _clamp(v: float, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(round(v))))
 
 
+# Pas d'accumulation ici — le GUI envoie directement l'angle absolu pour les servos.
+# arm_node se contente de borner et de transmettre.
+
+
 class ArmNode(LifecycleNode):
 
     def __init__(self):
@@ -89,10 +93,11 @@ class ArmNode(LifecycleNode):
 
         z, y, pince, speed, dump, bin_dir = msg.data[:6]
 
-        stepper = _clamp(z     * speed * 100.0, -100, 100)
-        s1      = _clamp(y     * speed * 100.0, -100, 100)
-        s23     = _clamp(pince * speed * 100.0, -100, 100)
-        s4      = 100 if dump > 0.5 else _clamp(bin_dir * speed * 100.0, -100, 100)
+        # Servos : y/pince/bin_dir sont des angles absolus [-100..100] calculés par le GUI
+        stepper = _clamp(z * speed * 100.0, -100, 100)
+        s1      = _clamp(y,       -100, 100)
+        s23     = _clamp(pince,   -100, 100)
+        s4      = 100 if dump > 0.5 else _clamp(bin_dir, -100, 100)
 
         self._publish(s1, s23, s23, s4, stepper)
 

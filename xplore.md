@@ -151,7 +151,8 @@ Menu principal (souris)
 > Les indicateurs de touches s'allument en rouge en temps réel dans la GUI quand pressés.
 
 ### Mécanisme hold-to-move
-- Key repeat OS (~30ms) + timeout par axe (200ms)
+- Commande calculée directement depuis `active_keys` à chaque tick du timer (100ms)
+- Tant qu'une touche est maintenue → sa valeur est publiée. Relâché → 0.0 immédiat
 - Le multiplicateur de vitesse est appliqué côté PC avant publication du Twist
 - La RPi reçoit les valeurs déjà scalées — pas besoin de connaître le niveau de vitesse
 
@@ -221,8 +222,9 @@ Pas besoin de coder le Kalman manuellement.
 
 ### Grille de navigation
 
-- Grille interne **10 lignes × 6 colonnes** (cellules 80×80cm) — 8m/0.8=10, 5m/0.8=6
-- Grille totale **12×8** avec rangée `BORDER` tout autour — élimine toute vérification out-of-bounds
+- Grille interne **10 lignes × 6 colonnes** (cellules non carrées : 800mm × 833mm) — 8m/10=800mm, 5m/6≈833mm
+- Grille totale **12 lignes × 8 colonnes** (GRID_ROWS=12, GRID_COLS=8) avec rangée `BORDER` tout autour — élimine toute vérification out-of-bounds
+- Convention : les **lignes (rows) augmentent dans le sens d'avancement** (8m), les colonnes = direction perpendiculaire (5m)
 - Départ : bas-droite — Cible : haut-gauche (ArUco)
 - Chaque cellule : état (`BORDER|UNDISCOVERED|FREE|OBSTACLE|AMBUSH`) + priorité (Chebyshev inversé vers cible)
 - Chaque cellule divisée en **4 mini-cases 40×40cm** (TL/TR/BL/BR) pour la détection fine des obstacles
@@ -469,7 +471,32 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 | 2 | `mode_manager_node` | `time.sleep(2.0)` au démarrage avant de configurer les nodes lifecycle — fragile si le système est lent | Remplacer par une boucle de polling qui vérifie la disponibilité des services sans sleep fixe |
 | 3 | `camera_node` | Gère son mode en interne (subscribe à `/rover/mode`) alors que tous les autres sont lifecycle — incohérence architecturale | Réécrire en LifecycleNode quand libcamera sera mieux maîtrisé |
 | 4 | Tous | Zéro tests automatisés | Ajouter des tests unitaires sur la cinématique diff, le mapping arm, le packing/unpacking de la struct serial |
+| 5 | `rover_gui.py` — `MapWidget` | La navigation BFS est simulée côté PC uniquement — les topics `/rover/nav_goal`, `/rover/grid_state`, `/rover/grid_pos` ne sont pas encore implémentés côté RPi | Implémenter un nœud `nav_node` sur le RPi qui publie l'état de la grille et reçoit les objectifs de navigation |
+| 6 | `xplore_pub` Docker | PySide6 et `libxcb-cursor0` doivent être réinstallés à chaque redémarrage du container (pas de persistence) | Ajouter `RUN pip install PySide6 && apt-get install -y libxcb-cursor0` dans le Dockerfile pour éviter les steps manuels |
 
 ---
 
-*Dernière mise à jour : 2026-05-10 (session 15 — architecture lifecycle complète : motor_controller/arm/aruco en LifecycleNode, mode_manager orchestrateur avec queue anti-race, serial_bridge alignement trames + reconnexion USB, zeros garantis Ctrl+C, launch file rover.launch.py)*
+## Prochaine session — à implémenter
+
+### 1. PID moteurs (feedback encodeurs)
+- `serial_bridge_node` publie déjà `/wheel_encoders` (Int32MultiArray [m1..m4])
+- Créer une boucle PID dans `motor_controller_node` qui compare vitesse cible (cmd_vel) et vitesse réelle (encodeurs) pour corriger le PWM
+- Actuellement : PWM brut sans feedback → le rover ne va pas droit si les moteurs sont déséquilibrés
+
+### 2. Traitement capteurs ultrason
+- `serial_bridge_node` publie déjà `/ultrasonic` (Float32MultiArray [d1..d5] en cm)
+- Créer la logique d'évitement d'obstacles qui consomme ce topic
+- Attention au mismatch de nom : RPi publie `/ultrasonic`, la GUI attend `/distances` — à harmoniser
+
+### 3. `autonomous_node` réel sur le RPi
+- Actuellement : la navigation BFS est simulée localement dans `MapWidget` (GUI côté PC)
+- À créer : `rover_xplore/rover_xplore/autonomous_node.py`
+  - Souscrit à `/aruco_detected` + `/ultrasonic` + `/wheel_encoders`
+  - Publie `/rover/cmd_vel` (commandes de déplacement)
+  - Publie `/rover_status` (String) → reçu par la GUI (AutonomousPage.status_label)
+  - Publie `/rover/grid_state` + `/rover/grid_pos` → reçu par MapWidget GUI
+- L'ajouter dans `setup.py` entry_points et `rover.launch.py`
+
+---
+
+*Dernière mise à jour : 2026-05-10 (session 17 — debug RPi : caméra CSI opérationnelle (câble rebranchée), lifecycle nodes fonctionnels, serial spam réduit à 1 log/5s, fix shutdown Ctrl+C tous les nodes, fix _transition_lock manquant dans mode_manager, fix hold-to-drive GUI race + bras)*
