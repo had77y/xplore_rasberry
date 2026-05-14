@@ -166,16 +166,23 @@ Menu principal (souris)
 ### Touches clavier (dans `rover_gui` mode bras)
 | Touche | Action |
 |--------|--------|
-| O / K | UP / DOWN (axe Z) |
-| J / L | CLOSE / OPEN (pinces) |
-| I / P | FLIP / UNFLIP (axe Y) |
-| ↑ / ↓ | Benne monte / descend |
+| O / K | UP / DOWN (axe Z — stepper) |
+| J / L | CLOSE / OPEN (pinces — servo) |
+| I / P | FLIP / UNFLIP (axe Y — servo) |
+| ↑ / ↓ | Benne monte / descend (servo) |
 | 6 / 7 / 8 / 9 / 0 | Niveaux de vitesse |
-| Espace | Stop tout (bras + benne) |
+| Espace | Stop tout (bras + benne + angles remis à 0) |
 | M | Retour menu |
 
-- Bouton "POSITION DE VIDAGE" → tilt benne pour vider
-- Topic publié : `/rover/arm_cmd` (`Float32MultiArray` — [z, y, pince, speed, dump, bin_dir])
+### Contrôle servos — angle absolu accumulé
+- **Servos** (pince, flip, benne) : le GUI accumule l'angle en local [-100..100] à chaque tick de 100ms. Tant qu'une touche est maintenue, l'angle augmente/diminue progressivement. Relâché → servo reste en place.
+- **Stepper** (axe Z) : directionnel, pas d'angle accumulé.
+- Bouton `↺ 0` à côté de chaque axe servo → reset individuel de l'angle à 0.
+- Bouton "POSITION DE VIDAGE" → force benne à 100 (position maximale).
+- Topic publié : `/rover/arm_cmd` (`Float32MultiArray` — [z, s1_angle, s23_angle, speed, dump, s4_angle])
+  - `z` = direction stepper (-1/0/+1) × speed
+  - `s1_angle`, `s23_angle`, `s4_angle` = angles absolus [-100..100] calculés par le GUI
+- `arm_node` se contente de borner et transmettre les angles (`clamp(y, -100, 100)`) — pas de recalcul.
 
 ---
 
@@ -403,7 +410,7 @@ ros2 launch rover_xplore rover.launch.py
 | `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub `/camera/image_raw` (bgr8, pour aruco) + `/camera/image_compressed` (JPEG, pour FPV), fallback V4L2. **Lance nativement hors Docker.** |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — orchestrateur lifecycle. Queue + worker thread unique (pas de race condition). Configure les nodes au démarrage, active/désactive selon le mode reçu sur `/rover/mode`. |
 | `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — LifecycleNode. Cinématique diff → `/rover/motor_cmd` Int32[FR,FL,BR,BL] (-255..255). Timeout 500ms. Zeros garantis à Ctrl+C. |
-| `rover_xplore/rover_xplore/arm_node.py` | Prêt — LifecycleNode. Reçoit `/rover/arm_cmd` Float32[z,y,pince,speed,dump,bin_dir] → `/rover/arm_serial_cmd` Int32[s1,s2,s3,s4,stepper]. Zeros garantis à Ctrl+C. |
+| `rover_xplore/rover_xplore/arm_node.py` | Prêt — LifecycleNode. Reçoit `/rover/arm_cmd` Float32[z,s1_angle,s23_angle,speed,dump,s4_angle] → `/rover/arm_serial_cmd` Int32[s1,s2,s3,s4,stepper]. Angles servos envoyés directs (le GUI accumule), stepper reste directionnel. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/aruco_node.py` | Prêt — LifecycleNode. Détection ArUco sur `/camera/image_raw` (bgr8 non compressé). Publie `/aruco_detected` Float32[found,id,cx,cy,area]. |
 | `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. Envoi struct 18B, réception struct 30B. Lecture buffer entier par tick (pas de corruption de trame). Reconnexion automatique si USB se débranche. Timeout 1s sécurité moteurs. |
 | `rover_xplore/launch/rover.launch.py` | Prêt — lance tous les nodes sauf camera_node (natif). |
@@ -413,7 +420,7 @@ ros2 launch rover_xplore rover.launch.py
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8 interactive, placement manuel départ/cible/obstacles (bouton OBSTACLE sticky, toggle), navigation simulée avec algo BFS global (transit via cases FREE vers meilleure UNDISCOVERED). **Architecture cible** : Start → publie `/rover/nav_goal`, affiche grille reçue depuis `/rover/grid_state` + position depuis `/rover/grid_pos` (à implémenter). **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. |
+| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8 interactive, BFS simulé. **ArmPage** : angles servos accumulés localement, affichage numérique (+75/-30/0), boutons reset individuel par servo, vue rover top-down avec vitesses roues. **RacePage** : idem vue rover top-down. **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. |
 | `rover_xplore_pub/rover_xplore_pub/xplore_logo.jpg` | Logo EPFL XPlore intégré dans la GUI (format paysage, fond #0C1427) |
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Fallback terminal — toujours dispo (`ros2 run rover_xplore_pub controller_node`) |
 | `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Fallback terminal — toujours dispo |
@@ -478,25 +485,30 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 
 ## Prochaine session — à implémenter
 
-### 1. PID moteurs (feedback encodeurs)
-- `serial_bridge_node` publie déjà `/wheel_encoders` (Int32MultiArray [m1..m4])
-- Créer une boucle PID dans `motor_controller_node` qui compare vitesse cible (cmd_vel) et vitesse réelle (encodeurs) pour corriger le PWM
-- Actuellement : PWM brut sans feedback → le rover ne va pas droit si les moteurs sont déséquilibrés
+### 1. `odometry_node.py` (priorité)
+Architecture complète documentée dans `autonome.md`.
+- Dead-reckoning encodeurs + filtre complémentaire gyro (MPU9250)
+- Publie `/rover/pose` [x_mm, y_mm, theta_rad] + `/rover/grid_pos` [col, row]
+- Service `/rover/reset_pose` (std_srvs/Trigger)
+- Plan détaillé : `/Users/hadyazzi/.claude/plans/virtual-chasing-bear.md`
+- Fichiers à modifier : `rover_xplore/rover_xplore/odometry_node.py` (créer), `setup.py`, `package.xml`, `rover.launch.py`
 
-### 2. Traitement capteurs ultrason
-- `serial_bridge_node` publie déjà `/ultrasonic` (Float32MultiArray [d1..d5] en cm)
-- Créer la logique d'évitement d'obstacles qui consomme ce topic
-- Attention au mismatch de nom : RPi publie `/ultrasonic`, la GUI attend `/distances` — à harmoniser
+### 2. `autonomous_node.py`
+Architecture complète dans `autonome.md` (sections 4, 5, 9, 10).
+- BFS + PID navigation case à case
+- Souscrit `/rover/pose` + `/rover/grid_pos` + `/aruco_detected` + `/ultrasonic`
+- Publie `/rover/cmd_vel` + `/rover_status` + `/rover/grid_state`
+- États : IDLE → EXPLORING → VISUAL_ALIGNING → VISUAL_APPROACHING → ARUCO_REACHED → RETURNING → DONE
 
-### 3. `autonomous_node` réel sur le RPi
-- Actuellement : la navigation BFS est simulée localement dans `MapWidget` (GUI côté PC)
-- À créer : `rover_xplore/rover_xplore/autonomous_node.py`
-  - Souscrit à `/aruco_detected` + `/ultrasonic` + `/wheel_encoders`
-  - Publie `/rover/cmd_vel` (commandes de déplacement)
-  - Publie `/rover_status` (String) → reçu par la GUI (AutonomousPage.status_label)
-  - Publie `/rover/grid_state` + `/rover/grid_pos` → reçu par MapWidget GUI
-- L'ajouter dans `setup.py` entry_points et `rover.launch.py`
+### 3. PID moteurs (feedback encodeurs)
+- Boucle fermée dans `motor_controller_node` sur `/wheel_encoders`
+- Actuellement : PWM brut sans feedback
+
+### Notes approche ArUco finale
+- Phase 1 : BFS vers case approx. donnée par opérateur avant mission
+- Phase 2 (visuelle) : `cx - 320` pour bearing, US d2 < 300mm pour stop
+- Option C (pose estimation tvec) documentée mais non implémentée — nécessite calibration caméra + taille marker physique
 
 ---
 
-*Dernière mise à jour : 2026-05-10 (session 17 — debug RPi : caméra CSI opérationnelle (câble rebranchée), lifecycle nodes fonctionnels, serial spam réduit à 1 log/5s, fix shutdown Ctrl+C tous les nodes, fix _transition_lock manquant dans mode_manager, fix hold-to-drive GUI race + bras)*
+*Dernière mise à jour : 2026-05-15 (session 18 — mode bras : angle absolu accumulé côté GUI (servos), arm_node transmet direct, boutons reset servo, vue rover top-down avec vitesses roues dans Race et Arm. Architecture autonome complète dans autonome.md. Prochaine session : coder odometry_node.py)*
