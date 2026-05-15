@@ -156,6 +156,20 @@ Menu principal (souris)
 - Le multiplicateur de vitesse est appliqué côté PC avant publication du Twist
 - La RPi reçoit les valeurs déjà scalées — pas besoin de connaître le niveau de vitesse
 
+### Mapping touches → Twist (MOVEMENT_KEYS)
+| Touche | linear | angular | Effet |
+|--------|--------|---------|-------|
+| W | +1.0 | 0 | Avance |
+| S | -1.0 | 0 | Recule |
+| A | 0 | +8.0 | Rotation gauche sur place (×8 pour compenser WHEEL_BASE/2=0.125 → ±100% PWM) |
+| D | 0 | -8.0 | Rotation droite sur place |
+| Q | +1.0 | +1.0 | Arc avant-gauche |
+| E | +1.0 | -1.0 | Arc avant-droite |
+| Y | -1.0 | -1.0 | Arc arrière-gauche (angular négatif = roue droite plus rapide en arrière) |
+| X | -1.0 | +1.0 | Arc arrière-droite |
+
+> **Note** : le clamp `[-1, 1]` est appliqué uniquement sur `linear`, pas sur `angular` (pour permettre ±8.0 sur les rotations). `motor_controller_node` clamp les PWM à `[-255, 255]`.
+
 ### Sécurité réseau
 - `teleop_receiver_node` stoppe les moteurs si aucune commande reçue depuis 500ms
 
@@ -511,4 +525,4 @@ Architecture complète dans `autonome.md` (sections 4, 5, 9, 10).
 
 ---
 
-*Dernière mise à jour : 2026-05-15 (session 18 — mode bras : angle absolu accumulé côté GUI (servos), arm_node transmet direct, boutons reset servo, vue rover top-down avec vitesses roues dans Race et Arm. Architecture autonome complète dans autonome.md. Prochaine session : coder odometry_node.py)*
+*Dernière mise à jour : 2026-05-15 (session 18 — mode bras : angle absolu accumulé côté GUI (servos), arm_node transmet direct, boutons reset servo, vue rover top-down avec vitesses roues dans Race et Arm. Fix téléop : Y/X arrière inversés, rotation A/D clamp supprimé (±8.0 → ±100% PWM). Architecture autonome complète dans autonome.md. Prochaine session : coder odometry_node.py)*

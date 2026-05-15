@@ -6,12 +6,12 @@
 #         Toujours actif, indépendant du mode.
 #
 # ENVOI (Pi → Micro) à 10 Hz — struct 18 octets little-endian :
-#   uint16 servo_1, servo_2, servo_3, servo_4   (-100..100 encodé two's complement)
+#   int16  servo_1, servo_2, servo_3, servo_4   (-100..100)
 #   int16  motor1..4                             (-255..255)
 #   int16  stepper                               (-100..100)
 #
 # RÉCEPTION (Micro → Pi) à chaque tick — struct 30 octets :
-#   uint16 accel_x/y/z, gyro_x/y/z             (IMU brut)
+#   int16  accel_x/y/z, gyro_x/y/z             (IMU brut, signé)
 #   int16  motor1..4                             (vitesses encodeurs roues)
 #   uint16 distance_1..5                         (US en cm)
 #
@@ -39,8 +39,8 @@ from std_msgs.msg import Float32MultiArray, Int32MultiArray
 
 import serial
 
-_FMT_SEND  = '<4H5h'    # 18 octets
-_FMT_RECV  = '<6H4h5H'  # 30 octets
+_FMT_SEND  = '<9h'      # 18 octets : 9 × int16 (servos×4, motors×4, stepper)
+_FMT_RECV  = '<10h5H'  # 30 octets : 10 × int16 (IMU×6, encodeurs×4) + 5 × uint16 (US)
 _SIZE_RECV = struct.calcsize(_FMT_RECV)
 
 MOTOR_TIMEOUT_S = 1.0   # sécurité : zéro moteurs si plus de commande depuis 1s
@@ -48,11 +48,6 @@ MOTOR_TIMEOUT_S = 1.0   # sécurité : zéro moteurs si plus de commande depuis 
 
 def _clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
-
-
-def _to_uint16(signed_val: int) -> int:
-    """Encode une valeur signée en uint16 two's complement."""
-    return int(signed_val) & 0xFFFF
 
 
 class SerialBridgeNode(Node):
@@ -140,10 +135,7 @@ class SerialBridgeNode(Node):
 
         payload = struct.pack(
             _FMT_SEND,
-            _to_uint16(self._servos[0]),
-            _to_uint16(self._servos[1]),
-            _to_uint16(self._servos[2]),
-            _to_uint16(self._servos[3]),
+            self._servos[0], self._servos[1], self._servos[2], self._servos[3],
             self._motors[0], self._motors[1], self._motors[2], self._motors[3],
             self._stepper,
         )
