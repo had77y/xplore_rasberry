@@ -426,7 +426,7 @@ ros2 launch rover_xplore rover.launch.py
 | `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — LifecycleNode. Cinématique diff → `/rover/motor_cmd` Int32[FR,FL,BR,BL] (-255..255). Timeout 500ms. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/arm_node.py` | Prêt — LifecycleNode. Reçoit `/rover/arm_cmd` Float32[z,s1_angle,s23_angle,speed,dump,s4_angle] → `/rover/arm_serial_cmd` Int32[s1,s2,s3,s4,stepper]. Angles servos envoyés directs (le GUI accumule), stepper reste directionnel. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/aruco_node.py` | Prêt — LifecycleNode. Détection ArUco sur `/camera/image_raw` (bgr8 non compressé). Publie `/aruco_detected` Float32[found,id,cx,cy,area]. |
-| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. Envoi struct 18B, réception struct 30B. Lecture buffer entier par tick (pas de corruption de trame). Reconnexion automatique si USB se débranche. Timeout 1s sécurité moteurs. |
+| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. `_FMT_SEND='<9h'` (9×int16), `_FMT_RECV='<10h5H'` (IMU+ENC int16, US uint16), aligné avec les types Arduino (`int16_t`/`uint16_t`). **Envoi immédiat sur réception commande** (latence ~0ms côté bridge) + timer 10 Hz pour sécurité/heartbeat. Reconnexion automatique USB. Timeout 1s moteurs. |
 | `rover_xplore/launch/rover.launch.py` | Prêt — lance tous les nodes sauf camera_node (natif). |
 | `rover_xplore/rover_xplore/autonomous_node.py` | À créer — grille BFS + machine à états, s'abonne `/rover/nav_goal`, publie `/rover/grid_state` + `/rover/grid_pos` |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
@@ -434,12 +434,13 @@ ros2 launch rover_xplore rover.launch.py
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8 interactive, BFS simulé. **ArmPage** : angles servos accumulés localement, affichage numérique (+75/-30/0), boutons reset individuel par servo, vue rover top-down avec vitesses roues. **RacePage** : idem vue rover top-down. **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. |
+| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8 interactive, BFS simulé. **ArmPage** : angles servos accumulés localement, affichage numérique (+75/-30/0), boutons reset individuel par servo, vue rover top-down avec vitesses roues. **RacePage** : idem vue rover top-down. **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. Fix : `keyReleaseEvent` sans filtre `isAutoRepeat` (Linux/X11 marquait le dernier release comme autorepeat → moteurs ne stoppaient jamais). Fix : touches I/P pivot bras inversées. |
+| `rover_xplore_pub/rover_xplore_pub/diag_node.py` | **Nouveau — dashboard terminal diagnostic.** Deux colonnes côte à côte : REÇU (IMU accel/gyro, encodeurs, US) \| ENVOYÉ (moteurs, servos+stepper). Rafraîchissement 10 Hz. Lancer : `ros2 run rover_xplore_pub diag_node` |
 | `rover_xplore_pub/rover_xplore_pub/xplore_logo.jpg` | Logo EPFL XPlore intégré dans la GUI (format paysage, fond #0C1427) |
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Fallback terminal — toujours dispo (`ros2 run rover_xplore_pub controller_node`) |
 | `rover_xplore_pub/rover_xplore_pub/video_viewer_node.py` | Fallback terminal — toujours dispo |
 | `rover_xplore_pub/rover_xplore_pub/teleop_node.py` | Remplacé par rover_gui |
-| `rover_xplore_pub/rover_xplore_pub/mode_selector_node.py` | Remplacé par rover_gui |
+| `rover_xplore_pub/rover_xplore_pub/mode_selector_node.py` | Remplacé par rover_gui — **bug connu** : publie `"teleop"` au lieu de `"race"`, ne pas utiliser |
 
 ### Lancer rover_gui (à faire à chaque démarrage Docker)
 
@@ -525,4 +526,4 @@ Architecture complète dans `autonome.md` (sections 4, 5, 9, 10).
 
 ---
 
-*Dernière mise à jour : 2026-05-15 (session 18 — mode bras : angle absolu accumulé côté GUI (servos), arm_node transmet direct, boutons reset servo, vue rover top-down avec vitesses roues dans Race et Arm. Fix téléop : Y/X arrière inversés, rotation A/D clamp supprimé (±8.0 → ±100% PWM). Architecture autonome complète dans autonome.md. Prochaine session : coder odometry_node.py)*
+*Dernière mise à jour : 2026-05-15 (session 19 — test élec + validation comm série. Fix structs : `_FMT_SEND '<9h'`, `_FMT_RECV '<10h5H'` alignés avec types Arduino int16_t/uint16_t. Fix GUI : keyReleaseEvent sans isAutoRepeat (moteurs ne stoppaient plus sur Linux/X11), touches I/P pivot bras inversées. Perf serial_bridge : envoi immédiat sur réception commande. Nouveau : diag_node terminal deux colonnes REÇU|ENVOYÉ 10 Hz. Prochaine session : coder odometry_node.py)*

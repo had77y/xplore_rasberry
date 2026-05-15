@@ -85,9 +85,9 @@ class CameraNode(Node):
         # Passe à True seulement quand le mode reçu est dans ACTIVE_MODES.
         self._active = False
 
-        # Publisher 1 : image compressée JPEG → vers le PC (via WiFi, ~1-2 MB/s)
+        # image brute BGR8 → vers aruco_node (local RPi, ~27 MB/s, uniquement si abonné)
         self.pub_raw  = self.create_publisher(Image,            '/camera/image_raw',        VIDEO_QOS)
-        # Publisher 2 : image brute BGR8 → vers aruco_node (local RPi, ~27 MB/s)
+        # image compressée JPEG → vers le PC (via WiFi, ~1-2 MB/s)
         self.pub_jpeg = self.create_publisher(CompressedImage,  '/camera/image_compressed', VIDEO_QOS)
 
         # Abonnement au mode : quand l'opérateur change le mode depuis le PC,
