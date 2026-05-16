@@ -328,20 +328,39 @@ serial_bridge_node  (toujours actif)
     ├── publie /imu/raw        → odometry_node
     └── publie /ultrasonic     → autonomous_node
 
-odometry_node  (toujours actif — À CRÉER)
+odometry_node  (toujours actif)
     ├── publie /rover/pose     → autonomous_node
     ├── publie /rover/grid_pos → autonomous_node + GUI
     └── service /rover/reset_pose
 
-autonomous_node  (LifecycleNode, actif en mode autonomous — À CRÉER)
+autonomous_node  (LifecycleNode, actif en mode autonomous)
     ├── souscrit /rover/pose
     ├── souscrit /rover/grid_pos
     ├── souscrit /aruco_detected
     ├── souscrit /ultrasonic
-    └── publie /rover/cmd_vel → motor_controller_node
+    ├── souscrit /rover/nav_goal   ← cible envoyée par le GUI au moment du START
+    ├── publie /rover/cmd_vel      → motor_controller_node
+    └── publie /rover/grid_state   → GUI (grille temps réel 96 valeurs row-major)
 
 mode_manager_node  (toujours actif)
     └── active autonomous_node quand mode = 'autonomous'
+```
+
+### Démarrage du mode autonome — flux opérateur
+
+```
+1. Opérateur sélectionne mode "autonomous" dans le GUI
+   → mode_manager active autonomous_node (Inactive → Active)
+   → autonomous_node démarre en IDLE (attend nav_goal)
+
+2. Opérateur oriente le rover dans la direction de départ, appuie reset_pose si besoin
+
+3. Opérateur clique la case cible sur la MapWidget du GUI, appuie START
+   → GUI publie /rover/nav_goal [row, col]
+   → autonomous_node reçoit nav_goal, reset la grille, lance EXPLORING
+
+4. Le rover explore et renvoie /rover/grid_state à chaque changement de case
+   → GUI met à jour la MapWidget en temps réel
 ```
 
 ---
@@ -445,25 +464,27 @@ arrived = dist < ARRIVAL_TOL_MM
 
 ```
 IDLE
-  └─ réception /rover/nav_goal ──→ EXPLORING
+  └─ réception /rover/nav_goal [row, col] ──→ EXPLORING
+       (reset grille + recalc priorités Chebyshev vers cible)
 
-EXPLORING  (BFS sans cible connue — exploration systématique)
+EXPLORING  (BFS prioritaire vers la zone cible — Phase 1)
   ├─ ArUco détecté (/aruco_detected found=1.0)
-  │     → recalculer priorités Chebyshev vers case ArUco
-  │     → rester en NAVIGATING (BFS route naturellement vers ArUco)
-  └─ case ArUco atteinte ──→ ARUCO_REACHED
+  │     → recalculer priorités Chebyshev vers la case nav_goal
+  │     → continuer EXPLORING (BFS route naturellement vers ArUco)
+  ├─ ArUco area >= AREA_NEAR  (Phase 2 : approche visuelle)
+  │     → VISUAL_APPROACH  (TODO : asservissement ArUco centrage)
+  └─ case nav_goal atteinte ──→ RETURNING
 
-ARUCO_REACHED
-  └─ ramassage bouteille (arm — à planifier plus tard) ──→ RETURNING
-
-RETURNING  (BFS sur grille connue de la position actuelle vers case départ)
+RETURNING  (BFS sur grille connue vers case de départ)
   └─ case départ atteinte ──→ DONE
 
 DONE
-  └─ publier status, stopper moteurs
+  └─ stopper moteurs, publier grid_state final
 ```
 
-> **Retour** : on utilise BFS sur la grille déjà entièrement connue (toutes les cases sont FREE/OBSTACLE à ce stade) de la position courante vers la case de départ — plus court et plus fiable que rejouer le `path_stack` à l'envers.  
+> **Phase 1 → Phase 2** : le passage à l'approche visuelle est déclenché par la taille du marqueur ArUco dans l'image (`area` dans `/aruco_detected`). Dès que `area >= AREA_NEAR`, le rover est suffisamment proche pour que la camera guide la correction fine. `AREA_NEAR` est une constante à calibrer selon la résolution caméra.
+
+> **Retour** : BFS sur la grille connue — plus court et plus fiable que rejouer le `path_stack` à l'envers.  
 > Le `path_stack` reste réservé au backtracking AMBUSH pendant l'exploration.
 
 ---
@@ -533,11 +554,14 @@ def _on_new_obstacle(self, row, col):
 
 ## 12. Fichiers à créer / modifier
 
-| Fichier | Action |
-|---------|--------|
-| `rover_xplore/rover_xplore/odometry_node.py` | Créer |
-| `rover_xplore/rover_xplore/autonomous_node.py` | Créer |
-| `rover_xplore/setup.py` | Ajouter entry points |
-| `rover_xplore/package.xml` | Ajouter `<depend>std_srvs</depend>` |
-| `rover_xplore/launch/rover.launch.py` | Ajouter les 2 nouveaux nodes |
-| `rover_xplore/rover_xplore/mode_manager_node.py` | Ajouter `autonomous_node` dans `_MODE_MAP` |
+| Fichier | Action | État |
+|---------|--------|------|
+| `rover_xplore/rover_xplore/odometry_node.py` | Créer | ✅ Fait |
+| `rover_xplore/rover_xplore/autonomous_node.py` | Créer | ✅ Fait |
+| `rover_xplore/setup.py` | Ajouter entry points | ✅ Fait |
+| `rover_xplore/package.xml` | Ajouter `<depend>std_srvs</depend>` | ✅ Fait |
+| `rover_xplore/rover_xplore/mode_manager_node.py` | Ajouter `autonomous_node` dans `_MODE_MAP` | ✅ Fait |
+| `rover_xplore/launch/rover.launch.py` | Ajouter `odometry_node` et `autonomous_node` | À faire |
+| `xplore_pub/rover_gui.py` — `RosBridge/_RosNode` | Ajouter publisher `/rover/nav_goal`, subscribers `/rover/grid_pos` + `/rover/grid_state` | À faire |
+| `xplore_pub/rover_gui.py` — `MapWidget` | Remplacer simulation BFS locale par monitoring ROS temps réel + bouton START envoie nav_goal | À faire |
+| `xplore_pub/rover_gui.py` — `AutonomousPage` | Connecter signals ROS → MapWidget | À faire |

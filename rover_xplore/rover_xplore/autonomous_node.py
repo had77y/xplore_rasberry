@@ -10,17 +10,19 @@
 #   Départ : (row=10, col=6)  Cible ArUco : (row=1, col=1)
 #
 # MACHINE D'ÉTATS :
-#   IDLE → EXPLORING → RETURNING → DONE
+#   IDLE → (nav_goal reçu) → EXPLORING → RETURNING → DONE
 #   Sous-états de mouvement : ROTATING → MOVING → IDLE → (nav_step)
 #
 # TOPICS ÉCOUTÉS (uniquement en Active) :
+#   /rover/nav_goal  Int32MultiArray    [row, col]  — cible envoyée par le GUI
 #   /rover/pose      Float32MultiArray  [x_mm, y_mm, theta_rad]
 #   /rover/grid_pos  Int32MultiArray    [col, row]
 #   /aruco_detected  Float32MultiArray  [found, id, cx, cy, area]
 #   /ultrasonic      Float32MultiArray  [d1..d5] en mm
 #
 # TOPICS PUBLIÉS :
-#   /rover/cmd_vel   geometry_msgs/Twist
+#   /rover/cmd_vel    geometry_msgs/Twist
+#   /rover/grid_state Int32MultiArray  [96 valeurs]  — état de chaque case (row-major)
 # ══════════════════════════════════════════════════════════════════════════════
 
 import math
@@ -97,9 +99,10 @@ class AutonomousNode(LifecycleNode):
     def __init__(self):
         super().__init__('autonomous_node')
 
-        self._pub_cmd = None
-        self._subs    = []
-        self._timer   = None
+        self._pub_cmd        = None
+        self._pub_grid_state = None
+        self._subs           = []
+        self._timer          = None
 
         # Pose courante (mise à jour par /rover/pose)
         self._x     = 0.0
@@ -115,8 +118,9 @@ class AutonomousNode(LifecycleNode):
         self._transit_path  = []   # chemin de transit FREE en cours
 
         # États
-        self._mission = _Mission.IDLE
-        self._move    = _Move.IDLE
+        self._mission   = _Mission.IDLE
+        self._move      = _Move.IDLE
+        self._nav_goal  = TARGET   # mis à jour par /rover/nav_goal
 
         # Cible du mouvement courant
         self._tgt_row      = START[0]
@@ -135,7 +139,8 @@ class AutonomousNode(LifecycleNode):
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def on_configure(self, state):
-        self._pub_cmd = self.create_publisher(Twist, '/rover/cmd_vel', 10)
+        self._pub_cmd        = self.create_publisher(Twist,           '/rover/cmd_vel',    10)
+        self._pub_grid_state = self.create_publisher(Int32MultiArray, '/rover/grid_state', 10)
         self.get_logger().info('autonomous_node configuré')
         return TransitionCallbackReturn.SUCCESS
 
@@ -143,17 +148,19 @@ class AutonomousNode(LifecycleNode):
         self._reset()
         self._subs = [
             self.create_subscription(
-                Float32MultiArray, '/rover/pose',       self._pose_cb,  10),
+                Float32MultiArray, '/rover/pose',       self._pose_cb,     10),
             self.create_subscription(
-                Int32MultiArray,   '/rover/grid_pos',   self._grid_cb,  10),
+                Int32MultiArray,   '/rover/grid_pos',   self._grid_cb,     10),
             self.create_subscription(
-                Float32MultiArray, '/aruco_detected',   self._aruco_cb, 10),
+                Float32MultiArray, '/aruco_detected',   self._aruco_cb,    10),
             self.create_subscription(
-                Float32MultiArray, '/ultrasonic',       self._us_cb,    10),
+                Float32MultiArray, '/ultrasonic',       self._us_cb,       10),
+            self.create_subscription(
+                Int32MultiArray,   '/rover/nav_goal',   self._nav_goal_cb, 10),
         ]
-        self._timer   = self.create_timer(0.1, self._tick)
-        self._mission = _Mission.EXPLORING
-        self.get_logger().info('autonomous_node actif — EXPLORING')
+        self._timer = self.create_timer(0.1, self._tick)
+        # Reste en IDLE jusqu'à réception d'un nav_goal depuis le GUI
+        self.get_logger().info('autonomous_node actif — en attente de nav_goal')
         return TransitionCallbackReturn.SUCCESS
 
     def on_deactivate(self, state):
@@ -172,6 +179,9 @@ class AutonomousNode(LifecycleNode):
         if self._pub_cmd:
             self.destroy_publisher(self._pub_cmd)
             self._pub_cmd = None
+        if self._pub_grid_state:
+            self.destroy_publisher(self._pub_grid_state)
+            self._pub_grid_state = None
         return TransitionCallbackReturn.SUCCESS
 
     def on_shutdown(self, state):
@@ -193,8 +203,8 @@ class AutonomousNode(LifecycleNode):
             return
         if msg.data[0] > 0.5 and not self._aruco_found:
             self._aruco_found = True
-            self._recalc_priorities(TARGET[0], TARGET[1])
-            self.get_logger().info('ArUco détecté — priorités recalculées vers TARGET')
+            self._recalc_priorities(self._nav_goal[0], self._nav_goal[1])
+            self.get_logger().info('ArUco détecté — priorités recalculées vers nav_goal')
 
     def _us_cb(self, msg: Float32MultiArray):
         if len(msg.data) < len(SENSORS) or self._mission == _Mission.IDLE:
@@ -207,6 +217,19 @@ class AutonomousNode(LifecycleNode):
                     self._mark_obstacle(sx, sy, sa, d)
             else:
                 self._us_hit[i] = 0
+
+    def _nav_goal_cb(self, msg: Int32MultiArray):
+        if len(msg.data) < 2:
+            return
+        row, col = int(msg.data[0]), int(msg.data[1])
+        if not (0 <= row < GRID_ROWS and 0 <= col < GRID_COLS):
+            self.get_logger().warn(f'nav_goal hors grille : ({row},{col}) — ignoré')
+            return
+        self._nav_goal = (row, col)
+        self._reset()
+        self._recalc_priorities(row, col)
+        self._mission = _Mission.EXPLORING
+        self.get_logger().info(f'nav_goal reçu ({row},{col}) — EXPLORING')
 
     # ── Boucle principale 10 Hz ───────────────────────────────────────────────
 
@@ -226,10 +249,11 @@ class AutonomousNode(LifecycleNode):
         # Marquer case courante FREE si découverte
         if self._cells[self._row][self._col] == UNDISCOVERED:
             self._cells[self._row][self._col] = FREE
+            self._publish_grid_state()
 
         # Vérifier fin de mission
         if self._mission == _Mission.EXPLORING:
-            if self._row == TARGET[0] and self._col == TARGET[1]:
+            if self._row == self._nav_goal[0] and self._col == self._nav_goal[1]:
                 self.get_logger().info('Cible atteinte — RETURNING')
                 self._mission = _Mission.RETURNING
                 self._transit_path.clear()
@@ -263,6 +287,7 @@ class AutonomousNode(LifecycleNode):
 
             # AMBUSH
             self._cells[self._row][self._col] = AMBUSH
+            self._publish_grid_state()
             self._ambush_streak += 1
             self.get_logger().warn(
                 f'AMBUSH ({self._row},{self._col}) streak={self._ambush_streak}'
@@ -366,6 +391,7 @@ class AutonomousNode(LifecycleNode):
             return
 
         self._cells[obs_r][obs_c] = OBSTACLE
+        self._publish_grid_state()
         self.get_logger().info(f'Obstacle marqué ({obs_r},{obs_c})')
 
         # Invalider le transit si l'obstacle y tombe
@@ -472,7 +498,7 @@ class AutonomousNode(LifecycleNode):
                     self._cells[r][c] = CELL_BORDER
 
         self._priority = [[0] * GRID_COLS for _ in range(GRID_ROWS)]
-        self._recalc_priorities(TARGET[0], TARGET[1])
+        self._recalc_priorities(self._nav_goal[0], self._nav_goal[1])
 
         self._path_stack   = []
         self._transit_path = []
@@ -485,8 +511,16 @@ class AutonomousNode(LifecycleNode):
 
         self.get_logger().info(
             f'Grille réinitialisée — départ ({START[0]},{START[1]}), '
-            f'cible ({TARGET[0]},{TARGET[1]})'
+            f'cible ({self._nav_goal[0]},{self._nav_goal[1]})'
         )
+
+    def _publish_grid_state(self):
+        if self._pub_grid_state is None or not self._cells:
+            return
+        flat = [self._cells[r][c] for r in range(GRID_ROWS) for c in range(GRID_COLS)]
+        msg = Int32MultiArray()
+        msg.data = flat
+        self._pub_grid_state.publish(msg)
 
     def _stop(self):
         self._cmd(0.0, 0.0)
