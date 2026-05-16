@@ -7,7 +7,7 @@
 #
 # ENVOI (Pi → Micro) à 10 Hz — struct 18 octets little-endian :
 #   int16  servo_1, servo_2, servo_3, servo_4   (-100..100)
-#   int16  motor1..4                             (-255..255)
+#   int16  motor1..4                             (-100..100)
 #   int16  stepper                               (-1 / 0 / +1)
 #
 # RÉCEPTION (Micro → Pi) à chaque tick — struct 30 octets :
@@ -21,7 +21,7 @@
 #   désactivation lifecycle, donc ce timeout est une sécurité supplémentaire.
 #
 # TOPICS ÉCOUTÉS :
-#   /rover/motor_cmd      Int32MultiArray [m1, m2, m3, m4]       (-255..255)
+#   /rover/motor_cmd      Int32MultiArray [m1, m2, m3, m4]       (-100..100)
 #   /rover/arm_serial_cmd Int32MultiArray [s1, s2, s3, s4, step] (step = -1/0/+1)
 #
 # TOPICS PUBLIÉS :
@@ -96,7 +96,7 @@ class SerialBridgeNode(Node):
 
     def _motor_cb(self, msg: Int32MultiArray):
         if len(msg.data) >= 4:
-            self._motors = [_clamp(int(v), -255, 255) for v in msg.data[:4]]
+            self._motors = [_clamp(int(v), -100, 100) for v in msg.data[:4]]
             self._last_motor_time = self.get_clock().now()
             self._send_struct()
 

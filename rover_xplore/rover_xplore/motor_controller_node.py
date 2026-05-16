@@ -25,7 +25,7 @@
 #   /rover/cmd_vel  geometry_msgs/Twist
 #
 # TOPICS PUBLIÉS :
-#   /rover/motor_cmd  std_msgs/Int32MultiArray  [FR, FL, BR, BL]  (-255..255)
+#   /rover/motor_cmd  std_msgs/Int32MultiArray  [FR, FL, BR, BL]  (-100..100)
 #
 # SÉCURITÉ : timeout 500ms sans cmd_vel → publie zeros.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,9 +123,9 @@ class MotorControllerNode(LifecycleNode):
     def _publish_speeds(self, v_left: float, v_right: float):
         if self._pub is None:
             return
-        scale = 255.0 / self.MAX_SPEED_MS
-        left  = _clamp(v_left  * scale, -255, 255)
-        right = _clamp(v_right * scale, -255, 255)
+        scale = 100.0 / self.MAX_SPEED_MS
+        left  = _clamp(v_left  * scale, -100, 100)
+        right = _clamp(v_right * scale, -100, 100)
         msg = Int32MultiArray()
         msg.data = [right, left, right, left]  # FR, FL, BR, BL
         self._pub.publish(msg)
