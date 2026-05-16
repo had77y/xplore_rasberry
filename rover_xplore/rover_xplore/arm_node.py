@@ -93,8 +93,8 @@ class ArmNode(LifecycleNode):
 
         z, y, pince, speed, dump, bin_dir = msg.data[:6]
 
-        # Servos : y/pince/bin_dir sont des angles absolus [-100..100] calculés par le GUI
-        stepper = _clamp(z * speed * 100.0, -100, 100)
+        # Stepper : direction uniquement (1 = monter, -1 = descendre, 0 = stop)
+        stepper = 1 if z > 0.0 else (-1 if z < 0.0 else 0)
         s1      = _clamp(y,       -100, 100)
         s23     = _clamp(pince,   -100, 100)
         s4      = 100 if dump > 0.5 else _clamp(bin_dir, -100, 100)
