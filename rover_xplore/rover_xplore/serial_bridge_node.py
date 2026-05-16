@@ -103,7 +103,7 @@ class SerialBridgeNode(Node):
     def _arm_cb(self, msg: Int32MultiArray):
         if len(msg.data) >= 5:
             self._servos  = [_clamp(int(v), -100, 100) for v in msg.data[:4]]
-            self._stepper = _clamp(int(msg.data[4]), -100, 100)
+            self._stepper = _clamp(int(msg.data[4]), -1, 1)
             self._send_struct()
 
     # ── Tick 10 Hz ────────────────────────────────────────────────────────────
