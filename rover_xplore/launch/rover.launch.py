@@ -45,6 +45,22 @@ def generate_launch_description():
             output='screen',
         ),
 
+        # Odométrie dead-reckoning (encodeurs + gyro) — toujours actif
+        Node(
+            package='rover_xplore',
+            executable='odometry_node',
+            name='odometry_node',
+            output='screen',
+        ),
+
+        # Navigation autonome BFS — géré par mode_manager (LifecycleNode)
+        Node(
+            package='rover_xplore',
+            executable='autonomous_node',
+            name='autonomous_node',
+            output='screen',
+        ),
+
         # camera_node est intentionnellement absent de ce launch file.
         # Il doit tourner NATIVEMENT sur le Pi (hors Docker) car libcamera
         # n'est pas accessible depuis un container.
