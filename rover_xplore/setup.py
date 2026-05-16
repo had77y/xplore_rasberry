@@ -30,6 +30,8 @@ setup(
             'motor_controller_node = rover_xplore.motor_controller_node:main',
             'serial_bridge_node = rover_xplore.serial_bridge_node:main',
             'arm_node = rover_xplore.arm_node:main',
+            'odometry_node = rover_xplore.odometry_node:main',
+            'autonomous_node = rover_xplore.autonomous_node:main',
         ],
     },
 )

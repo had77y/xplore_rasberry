@@ -39,10 +39,10 @@ from std_msgs.msg import String
 
 # Table de vérité : pour chaque mode, quel node doit être actif ?
 _MODE_MAP: dict[str, dict[str, bool]] = {
-    'idle':       {'motor_controller_node': False, 'arm_node': False, 'aruco_node': False},
-    'race':       {'motor_controller_node': True,  'arm_node': False, 'aruco_node': False},
-    'arm':        {'motor_controller_node': True,  'arm_node': True,  'aruco_node': False},
-    'autonomous': {'motor_controller_node': True,  'arm_node': True,  'aruco_node': True},
+    'idle':       {'motor_controller_node': False, 'arm_node': False, 'aruco_node': False, 'autonomous_node': False},
+    'race':       {'motor_controller_node': True,  'arm_node': False, 'aruco_node': False, 'autonomous_node': False},
+    'arm':        {'motor_controller_node': True,  'arm_node': True,  'aruco_node': False, 'autonomous_node': False},
+    'autonomous': {'motor_controller_node': True,  'arm_node': False, 'aruco_node': True,  'autonomous_node': True},
 }
 
 _MANAGED_NODES = list(next(iter(_MODE_MAP.values())).keys())
