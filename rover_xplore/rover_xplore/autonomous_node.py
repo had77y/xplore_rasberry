@@ -33,7 +33,7 @@ from math import atan2, cos, floor, pi, sin, sqrt
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
-from std_msgs.msg import Float32MultiArray, Int32MultiArray
+from std_msgs.msg import Float32MultiArray, Int32MultiArray, String
 
 # ── Grille ────────────────────────────────────────────────────────────────────
 GRID_ROWS    = 12
@@ -66,26 +66,64 @@ SENSORS = [
 HIT_COUNT_REQUIRED = 2   # lectures consécutives avant de marquer OBSTACLE (debounce)
 
 # ── Mouvement case à case ─────────────────────────────────────────────────────
-ANGLE_TOL_RAD  = 0.08    # rad — ≈ 4.6° — tolérance fin de rotation
-ARRIVAL_TOL_MM = 100     # mm — tolérance arrivée au centre de case
+ANGLE_TOL_RAD       = 0.08   # rad — ≈ 4.6° — tolérance fin de rotation
+ARRIVAL_TOL_MM      = 100    # mm — tolérance arrivée centre de case (navigation grille)
+ARRIVAL_TOL_FINE_MM = 40     # mm — tolérance fine alignment (alignement bouteille)
 KP_ROT         = 1.5     # gain P rotation
 MAX_ROT_SPEED  = 0.8     # rad/s
-KP_LIN         = 0.0008  # gain P avancement (mm → m/s)
-MIN_SPEED      = 0.10    # m/s
+DECEL_START_MM = 500     # distance à partir de laquelle on commence à freiner
+MIN_SPEED      = 0.07    # m/s — vitesse minimale d'approche
 MAX_SPEED      = 0.25    # m/s
 KA             = 0.5     # gain correction angulaire pendant MOVING
 
 AMBUSH_LIMIT   = 5       # AMBUSH consécutifs max avant arrêt d'urgence
 
+# ── Timeouts mouvement ────────────────────────────────────────────────────────
+# Chaque timeout démarre depuis _move_start_time, réinitialisé au passage ROTATING→MOVING.
+# Les deux phases ont donc leur propre budget de temps indépendant.
+TIMEOUT_ROTATE_S    =  7.0   # s — rotation max (180° à 0.8 rad/s ≈ 5 s + marge)
+TIMEOUT_MOVE_S      = 12.0   # s — déplacement case (diagonale 1155 mm ≈ 5 s + marge)
+TIMEOUT_FINE_MOVE_S =  8.0   # s — fine alignment (courte distance, prend du temps à MIN_SPEED)
+TIMEOUT_ARUCO_S     = 25.0   # s — approche ArUco totale (avance + recul)
+STALE_POSE_S        =  1.0   # s — odométrie stale → arrêt d'urgence
+
+# ── Filtrage ultrasonique ─────────────────────────────────────────────────────
+US_WINDOW_SIZE = 3       # taille fenêtre médiane (= 300 ms à 10 Hz)
+FRONT_STOP_MM  = 300     # arrêt d'urgence si obstacle devant < cette valeur (en MOVING)
+_FRONT_IDX     = {0, 1, 2}   # indices d1, d2, d3 = capteurs avant
+
 # ── 8 directions de navigation ────────────────────────────────────────────────
 _DIRS8 = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
 
+# ── Séquence bras pour ramasser la bouteille ─────────────────────────────────
+# Chaque étape : (durée en ticks @ 10 Hz, [z, y, pince, speed, dump, bin_dir])
+#   z=−1 descend, z=+1 monte  |  pince=−100 ouvert, pince=+100 fermé
+ARM_PICKUP_SEQ = [
+    (10, [ 0.0, 0.0, -100.0, 1.0, 0.0, 0.0]),  # ouvrir pince
+    (35, [-1.0, 0.0, -100.0, 1.0, 0.0, 0.0]),  # descendre bras
+    (15, [ 0.0, 0.0,  100.0, 1.0, 0.0, 0.0]),  # fermer pince (saisir)
+    (35, [ 1.0, 0.0,  100.0, 1.0, 0.0, 0.0]),  # monter bras
+    ( 5, [ 0.0, 0.0,  100.0, 1.0, 0.0, 0.0]),  # maintien pince fermée
+]
+
+# ── Approche visuelle ArUco ────────────────────────────────────────────────────
+ARUCO_AREA_THRESHOLD = 5000.0   # px² à ~1 m — à calibrer sur le rover réel
+ARUCO_APPROACH_SPEED = 0.05     # m/s — vitesse d'approche visuelle lente
+ARUCO_MAX_ADVANCE_MM = 1500.0   # mm — sécurité : distance max sans seuil aire
+
 
 class _Mission(Enum):
-    IDLE      = auto()
-    EXPLORING = auto()
-    RETURNING = auto()
-    DONE      = auto()
+    IDLE           = auto()
+    EXPLORING      = auto()
+    ARUCO_APPROACH = auto()   # approche visuelle ArUco + recul
+    COLLECTING     = auto()   # naviguer vers bouteille + séquence bras
+    RETURNING      = auto()
+    DONE           = auto()
+
+
+class _ArUcoPhase(Enum):
+    APPROACHING = auto()   # avance lentement, surveille l'aire
+    BACKING_UP  = auto()   # recule de la même distance
 
 
 class _Move(Enum):
@@ -101,8 +139,16 @@ class AutonomousNode(LifecycleNode):
 
         self._pub_cmd        = None
         self._pub_grid_state = None
+        self._pub_status     = None
+        self._pub_arm        = None
         self._subs           = []
         self._timer          = None
+        self._status_timer   = None
+
+        # Horodatages pour détecter les données stales
+        self._last_pose_time = None
+        self._last_us_time   = None
+        self._last_reason    = '—'
 
         # Pose courante (mise à jour par /rover/pose)
         self._x     = 0.0
@@ -130,18 +176,44 @@ class AutonomousNode(LifecycleNode):
         self._move_forward = True
 
         # ArUco
-        self._aruco_found = False
+        self._aruco_found            = False
+        self._aruco_area             = 0.0
+        self._aruco_phase            = _ArUcoPhase.APPROACHING
+        self._aruco_approach_heading = 0.0
+        self._aruco_start_x          = 0.0
+        self._aruco_start_y          = 0.0
+        self._aruco_advance_dist     = 0.0
 
-        # Debounce US
-        self._us_hit = [0] * len(SENSORS)
+        # Bouteille
+        # _bottle_offset : (rel_x_mm, rel_y_mm) relatif au centre ArUco — envoyé par GUI
+        # _bottle_world  : (x_mm, y_mm) en coordonnées arène, calculé depuis nav_goal
+        self._bottle_offset = None
+        self._bottle_world  = None
+        self._collecting    = False  # True pendant l'exécution de la séquence bras
+        self._arm_seq_idx   = 0
+        self._arm_seq_ticks = 0
+
+        # Navigation continue (fine alignment)
+        self._use_world_target = False   # True = _do_move vise (_tgt_x, _tgt_y) au lieu du centre de case
+        self._tgt_x = 0.0
+        self._tgt_y = 0.0
+
+        # Timeout mouvement
+        self._move_start_time = None
+
+        # Filtrage US
+        self._us_hit     = [0] * len(SENSORS)
+        self._us_windows = [[] for _ in range(len(SENSORS))]
 
         self._ambush_streak = 0
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def on_configure(self, state):
-        self._pub_cmd        = self.create_publisher(Twist,           '/rover/cmd_vel',    10)
-        self._pub_grid_state = self.create_publisher(Int32MultiArray, '/rover/grid_state', 10)
+        self._pub_cmd        = self.create_publisher(Twist,             '/rover/cmd_vel',    10)
+        self._pub_grid_state = self.create_publisher(Int32MultiArray,  '/rover/grid_state', 10)
+        self._pub_status     = self.create_publisher(String,           '/rover_status',     10)
+        self._pub_arm        = self.create_publisher(Float32MultiArray, '/rover/arm_cmd',   10)
         self.get_logger().info('autonomous_node configuré')
         return TransitionCallbackReturn.SUCCESS
 
@@ -157,10 +229,12 @@ class AutonomousNode(LifecycleNode):
             self.create_subscription(
                 Float32MultiArray, '/ultrasonic',       self._us_cb,       10),
             self.create_subscription(
-                Int32MultiArray,   '/rover/nav_goal',   self._nav_goal_cb, 10),
+                Int32MultiArray,   '/rover/nav_goal',    self._nav_goal_cb,  10),
+            self.create_subscription(
+                Float32MultiArray, '/rover/bottle_pos',  self._bottle_cb,    10),
         ]
-        self._timer = self.create_timer(0.1, self._tick)
-        # Reste en IDLE jusqu'à réception d'un nav_goal depuis le GUI
+        self._timer        = self.create_timer(0.1, self._tick)
+        self._status_timer = self.create_timer(0.5, self._publish_status)
         self.get_logger().info('autonomous_node actif — en attente de nav_goal')
         return TransitionCallbackReturn.SUCCESS
 
@@ -169,10 +243,15 @@ class AutonomousNode(LifecycleNode):
         if self._timer:
             self.destroy_timer(self._timer)
             self._timer = None
+        if self._status_timer:
+            self.destroy_timer(self._status_timer)
+            self._status_timer = None
         for s in self._subs:
             self.destroy_subscription(s)
-        self._subs    = []
-        self._mission = _Mission.IDLE
+        self._subs       = []
+        self._mission    = _Mission.IDLE
+        self._last_reason = 'node désactivé'
+        self._publish_status()
         self.get_logger().info('autonomous_node inactif — moteurs stoppés')
         return TransitionCallbackReturn.SUCCESS
 
@@ -183,6 +262,12 @@ class AutonomousNode(LifecycleNode):
         if self._pub_grid_state:
             self.destroy_publisher(self._pub_grid_state)
             self._pub_grid_state = None
+        if self._pub_status:
+            self.destroy_publisher(self._pub_status)
+            self._pub_status = None
+        if self._pub_arm:
+            self.destroy_publisher(self._pub_arm)
+            self._pub_arm = None
         return TransitionCallbackReturn.SUCCESS
 
     def on_shutdown(self, state):
@@ -194,6 +279,7 @@ class AutonomousNode(LifecycleNode):
     def _pose_cb(self, msg: Float32MultiArray):
         if len(msg.data) >= 3:
             self._x, self._y, self._theta = float(msg.data[0]), float(msg.data[1]), float(msg.data[2])
+            self._last_pose_time = self.get_clock().now()
 
     def _grid_cb(self, msg: Int32MultiArray):
         if len(msg.data) >= 2:
@@ -202,6 +288,8 @@ class AutonomousNode(LifecycleNode):
     def _aruco_cb(self, msg: Float32MultiArray):
         if len(msg.data) < 1:
             return
+        if len(msg.data) >= 5:
+            self._aruco_area = float(msg.data[4])
         if msg.data[0] > 0.5 and not self._aruco_found:
             self._aruco_found = True
             self._recalc_priorities(self._nav_goal[0], self._nav_goal[1])
@@ -210,14 +298,37 @@ class AutonomousNode(LifecycleNode):
     def _us_cb(self, msg: Float32MultiArray):
         if len(msg.data) < len(SENSORS) or self._mission == _Mission.IDLE:
             return
+        self._last_us_time = self.get_clock().now()
+
         for i, (sx, sy, sa, seuil) in enumerate(SENSORS):
-            d = msg.data[i]
-            if 10.0 < d < seuil:
-                self._us_hit[i] += 1
-                if self._us_hit[i] >= HIT_COUNT_REQUIRED:
-                    self._mark_obstacle(sx, sy, sa, d)
-            else:
+            raw = msg.data[i]
+
+            # Valeur hors plage physique → vider fenêtre et debounce
+            if not (10.0 < raw < seuil):
+                self._us_windows[i].clear()
                 self._us_hit[i] = 0
+                continue
+
+            # Fenêtre glissante + médiane (atténue les pics parasites)
+            win = self._us_windows[i]
+            win.append(raw)
+            if len(win) > US_WINDOW_SIZE:
+                win.pop(0)
+            d = sorted(win)[len(win) // 2]
+
+            # Arrêt d'urgence : capteur avant très proche pendant MOVING
+            if i in _FRONT_IDX and d < FRONT_STOP_MM and self._move == _Move.MOVING:
+                self._stop()
+                self._move = _Move.IDLE
+                self._transit_path.clear()
+                self._last_reason = f'ARRÊT URGENCE d{i + 1}={d:.0f}mm'
+                self.get_logger().warn(self._last_reason)
+                continue
+
+            # Debounce → marquer obstacle
+            self._us_hit[i] += 1
+            if self._us_hit[i] >= HIT_COUNT_REQUIRED:
+                self._mark_obstacle(sx, sy, sa, d)
 
     def _nav_goal_cb(self, msg: Int32MultiArray):
         if len(msg.data) < 2:
@@ -237,7 +348,9 @@ class AutonomousNode(LifecycleNode):
         if not (0 <= row < GRID_ROWS and 0 <= col < GRID_COLS):
             self.get_logger().warn(f'nav_goal hors grille : ({row},{col}) — ignoré')
             return
-        self._nav_goal = (row, col)
+        self._nav_goal    = (row, col)
+        self._last_reason = f'nav_goal ({row},{col})'
+        self._compute_bottle_world()
         self._reset()
         self._recalc_priorities(row, col)
         self._mission = _Mission.EXPLORING
@@ -250,6 +363,24 @@ class AutonomousNode(LifecycleNode):
 
     def _tick(self):
         if self._mission in (_Mission.IDLE, _Mission.DONE):
+            return
+        if self._mission == _Mission.COLLECTING and self._collecting:
+            self._arm_pickup_tick()
+            return
+
+        # Odométrie stale → arrêt d'urgence (rover aveugle)
+        if self._last_pose_time is not None:
+            age = (self.get_clock().now() - self._last_pose_time).nanoseconds / 1e9
+            if age > STALE_POSE_S:
+                self._stop()
+                self._move = _Move.IDLE
+                self._last_reason = f'POSE STALE {age:.1f}s — arrêt autonome'
+                self.get_logger().error(self._last_reason)
+                self._mission = _Mission.DONE
+                return
+
+        if self._mission == _Mission.ARUCO_APPROACH:
+            self._aruco_approach_tick()
             return
         if self._move == _Move.ROTATING:
             self._do_rotate()
@@ -268,14 +399,53 @@ class AutonomousNode(LifecycleNode):
 
         # Vérifier fin de mission
         if self._mission == _Mission.EXPLORING:
-            if self._row == self._nav_goal[0] and self._col == self._nav_goal[1]:
-                self.get_logger().info('Cible atteinte — RETURNING')
-                self._mission = _Mission.RETURNING
+            tr, tc = self._nav_goal
+            cheby = max(abs(self._row - tr), abs(self._col - tc))
+            if cheby == 0:
+                # Atterri dans la case ArUco elle-même — passer directement
                 self._transit_path.clear()
-                return   # prochain tick relancera _nav_step en RETURNING
+                self._mission = _Mission.COLLECTING if self._bottle_world else _Mission.RETURNING
+                self._last_reason = 'cible ArUco atteinte directement — ' + self._mission.name
+                return
+            elif cheby == 1:
+                # Case adjacente → approche visuelle lente vers ArUco
+                self._transit_path.clear()
+                self._move = _Move.IDLE
+                aruco_x = tc * CELL_COL_MM + CELL_COL_MM / 2.0
+                aruco_y = tr * CELL_ROW_MM + CELL_ROW_MM / 2.0
+                self._aruco_approach_heading = atan2(aruco_x - self._x, aruco_y - self._y)
+                self._aruco_start_x  = self._x
+                self._aruco_start_y  = self._y
+                self._aruco_advance_dist = 0.0
+                self._aruco_phase = _ArUcoPhase.APPROACHING
+                self._move_start_time = self.get_clock().now()
+                self._mission = _Mission.ARUCO_APPROACH
+                self._last_reason = f'adjacent ArUco ({tr},{tc}) — ARUCO_APPROACH'
+                self.get_logger().info(self._last_reason)
+                return
+
+        if self._mission == _Mission.COLLECTING:
+            bx, by = self._bottle_world
+            dist_to_bottle = sqrt((self._x - bx)**2 + (self._y - by)**2)
+            if dist_to_bottle < ARRIVAL_TOL_FINE_MM:
+                self._stop()
+                self._collecting    = True
+                self._arm_seq_idx   = 0
+                self._arm_seq_ticks = 0
+                self._last_reason   = 'bouteille atteinte — séquence bras'
+                self.get_logger().info('Bouteille atteinte — démarrage séquence bras')
+                return
+            # Case adjacente à la bouteille → fine alignment (évite d'entrer dans sa case)
+            bottle_row = int(floor(by / CELL_ROW_MM))
+            bottle_col = int(floor(bx / CELL_COL_MM))
+            chebyshev  = max(abs(self._row - bottle_row), abs(self._col - bottle_col))
+            if chebyshev <= 1:
+                self._start_move_to_world(bx, by)
+                return
 
         if self._mission == _Mission.RETURNING:
             if self._row == self._start[0] and self._col == self._start[1]:
+                self._last_reason = 'mission terminée'
                 self.get_logger().info('Retour au départ — DONE')
                 self._mission = _Mission.DONE
                 self._stop()
@@ -290,11 +460,25 @@ class AutonomousNode(LifecycleNode):
         # Planification BFS
         if self._mission == _Mission.EXPLORING:
             path = self._bfs_best_undiscovered(self._row, self._col)
+        elif self._mission == _Mission.COLLECTING:
+            bx, by = self._bottle_world
+            br = int(floor(by / CELL_ROW_MM))
+            bc = int(floor(bx / CELL_COL_MM))
+            path = self._bfs_to(self._row, self._col, br, bc)
         else:
-            path = self._bfs_to(self._row, self._col, self._start[0], self._start[1])
+            # RETURNING : chemin optimal par cases déjà visitées (FREE), fallback général
+            path = self._bfs_to(self._row, self._col, self._start[0], self._start[1], free_only=True)
+            if path is None or len(path) < 2:
+                path = self._bfs_to(self._row, self._col, self._start[0], self._start[1])
 
         if path is None or len(path) < 2:
+            if self._mission == _Mission.COLLECTING:
+                self._last_reason = 'aucun chemin bouteille — retour direct'
+                self.get_logger().error('Aucun chemin vers bouteille — RETURNING')
+                self._mission = _Mission.RETURNING
+                return
             if self._mission == _Mission.RETURNING:
+                self._last_reason = 'aucun chemin retour — bloqué'
                 self.get_logger().error('Aucun chemin retour — arrêt')
                 self._mission = _Mission.DONE
                 self._stop()
@@ -304,10 +488,10 @@ class AutonomousNode(LifecycleNode):
             self._cells[self._row][self._col] = AMBUSH
             self._publish_grid_state()
             self._ambush_streak += 1
-            self.get_logger().warn(
-                f'AMBUSH ({self._row},{self._col}) streak={self._ambush_streak}'
-            )
+            self._last_reason = f'AMBUSH ({self._row},{self._col}) streak={self._ambush_streak}'
+            self.get_logger().warn(self._last_reason)
             if self._ambush_streak >= AMBUSH_LIMIT:
+                self._last_reason = 'rover bloqué — arrêt autonome'
                 self.get_logger().error('Rover bloqué — arrêt autonome')
                 self._mission = _Mission.DONE
                 self._stop()
@@ -350,38 +534,101 @@ class AutonomousNode(LifecycleNode):
             self._heading_tgt  = _norm(heading + pi)
             self._move_forward = False
 
+        self._use_world_target = False
+        self._move_start_time  = self.get_clock().now()
         self._move = _Move.ROTATING
         self.get_logger().info(
             f'→ ({row},{col})  cap={math.degrees(self._heading_tgt):.1f}°  '
             f'{"FWD" if self._move_forward else "REV"}'
         )
 
+    def _start_move_to_world(self, wx: float, wy: float):
+        """Fine alignment : navigation vers des coordonnées monde exactes (mm)."""
+        self._tgt_x = wx
+        self._tgt_y = wy
+        dx = wx - self._x
+        dy = wy - self._y
+        heading = atan2(dx, dy)
+        delta = _norm(heading - self._theta)
+        if abs(delta) <= pi / 2:
+            self._heading_tgt  = heading
+            self._move_forward = True
+        else:
+            self._heading_tgt  = _norm(heading + pi)
+            self._move_forward = False
+        self._use_world_target = True
+        self._move_start_time  = self.get_clock().now()
+        self._move = _Move.ROTATING
+        self.get_logger().info(
+            f'→ fine align ({wx:.0f},{wy:.0f}) mm  '
+            f'cap={math.degrees(self._heading_tgt):.1f}°'
+        )
+
     def _do_rotate(self):
+        if self._move_start_time is not None:
+            elapsed = (self.get_clock().now() - self._move_start_time).nanoseconds / 1e9
+            if elapsed > TIMEOUT_ROTATE_S:
+                self._stop()
+                self._move_start_time = self.get_clock().now()   # reset : MOVING a son propre budget
+                self._move = _Move.MOVING
+                self._last_reason = f'TIMEOUT rotation {elapsed:.1f}s — passe MOVING de force'
+                self.get_logger().warn(self._last_reason)
+                return
+
         delta = _norm(self._heading_tgt - self._theta)
         if abs(delta) < ANGLE_TOL_RAD:
             self._stop()
+            self._move_start_time = self.get_clock().now()   # reset : MOVING a son propre budget
             self._move = _Move.MOVING
             return
         spd = max(-MAX_ROT_SPEED, min(MAX_ROT_SPEED, KP_ROT * delta))
         self._cmd(0.0, spd)
 
     def _do_move(self):
-        # Stopper si la case cible est devenue un obstacle
-        if self._cells[self._tgt_row][self._tgt_col] == OBSTACLE:
-            self._stop()
-            self._move = _Move.IDLE
-            return
+        if self._move_start_time is not None:
+            elapsed = (self.get_clock().now() - self._move_start_time).nanoseconds / 1e9
+            tmo = TIMEOUT_FINE_MOVE_S if self._use_world_target else TIMEOUT_MOVE_S
+            if elapsed > tmo:
+                self._stop()
+                self._move = _Move.IDLE
+                if self._use_world_target:
+                    # Fine alignment — revenir au BFS grille
+                    self._use_world_target = False
+                    self._last_reason = f'TIMEOUT fine align {elapsed:.1f}s — retour BFS grille'
+                else:
+                    # Déplacement case — marquer AMBUSH, replanifier
+                    self._cells[self._tgt_row][self._tgt_col] = AMBUSH
+                    self._publish_grid_state()
+                    self._last_reason = f'TIMEOUT move {elapsed:.1f}s — AMBUSH ({self._tgt_row},{self._tgt_col})'
+                self.get_logger().warn(self._last_reason)
+                return
 
-        x_c = self._tgt_col * CELL_COL_MM + CELL_COL_MM / 2.0
-        y_c = self._tgt_row * CELL_ROW_MM + CELL_ROW_MM / 2.0
+        if self._use_world_target:
+            x_c, y_c = self._tgt_x, self._tgt_y
+            tol = ARRIVAL_TOL_FINE_MM
+        else:
+            # Stopper si la case cible est devenue un obstacle
+            if self._cells[self._tgt_row][self._tgt_col] == OBSTACLE:
+                self._stop()
+                self._move = _Move.IDLE
+                return
+            x_c = self._tgt_col * CELL_COL_MM + CELL_COL_MM / 2.0
+            y_c = self._tgt_row * CELL_ROW_MM + CELL_ROW_MM / 2.0
+            tol = ARRIVAL_TOL_MM
+
         dist = sqrt((self._x - x_c)**2 + (self._y - y_c)**2)
 
-        if dist < ARRIVAL_TOL_MM:
+        if dist < tol:
             self._stop()
             self._move = _Move.IDLE
             return
 
-        lin = max(MIN_SPEED, min(MAX_SPEED, KP_LIN * dist))
+        if dist >= DECEL_START_MM:
+            lin = MAX_SPEED
+        else:
+            # Rampe linéaire : MAX_SPEED à DECEL_START_MM → MIN_SPEED à ARRIVAL_TOL_MM
+            t = (dist - ARRIVAL_TOL_MM) / (DECEL_START_MM - ARRIVAL_TOL_MM)
+            lin = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * max(0.0, t)
         if not self._move_forward:
             lin = -lin
 
@@ -402,12 +649,15 @@ class AutonomousNode(LifecycleNode):
 
         if not (0 <= obs_r < GRID_ROWS and 0 <= obs_c < GRID_COLS):
             return
+        if obs_r == self._row and obs_c == self._col:
+            return   # ne pas marquer la case actuelle
         if self._cells[obs_r][obs_c] in (CELL_BORDER, OBSTACLE):
             return
 
         self._cells[obs_r][obs_c] = OBSTACLE
         self._publish_grid_state()
-        self.get_logger().info(f'Obstacle marqué ({obs_r},{obs_c})')
+        self._last_reason = f'obstacle ({obs_r},{obs_c}) à {d:.0f}mm'
+        self.get_logger().info(self._last_reason)
 
         # Invalider le transit si l'obstacle y tombe
         if any(r == obs_r and c == obs_c for r, c in self._transit_path):
@@ -462,8 +712,9 @@ class AutonomousNode(LifecycleNode):
 
         return best_path
 
-    def _bfs_to(self, sr: int, sc: int, tr: int, tc: int):
-        """Chemin de (sr,sc) à (tr,tc) sur la grille connue."""
+    def _bfs_to(self, sr: int, sc: int, tr: int, tc: int, free_only: bool = False):
+        """Chemin de (sr,sc) à (tr,tc) sur la grille connue.
+        free_only=True : uniquement les cases FREE (retour optimal par cases visitées)."""
         if sr == tr and sc == tc:
             return [(sr, sc), (tr, tc)]   # déjà sur place — longueur 2 pour éviter AMBUSH
 
@@ -483,7 +734,10 @@ class AutonomousNode(LifecycleNode):
                     continue
                 if visited[nr][nc]:
                     continue
-                if self._cells[nr][nc] in (CELL_BORDER, OBSTACLE, AMBUSH):
+                ns = self._cells[nr][nc]
+                if ns in (CELL_BORDER, OBSTACLE, AMBUSH):
+                    continue
+                if free_only and ns != FREE:
                     continue
                 if not _diag_clear(self._cells, r, c, dr, dc):
                     continue
@@ -515,19 +769,50 @@ class AutonomousNode(LifecycleNode):
         self._priority = [[0] * GRID_COLS for _ in range(GRID_ROWS)]
         self._recalc_priorities(self._nav_goal[0], self._nav_goal[1])
 
-        self._path_stack   = []
-        self._transit_path = []
-        self._move         = _Move.IDLE
-        self._mission      = _Mission.IDLE
-        self._aruco_found  = False
+        self._path_stack    = []
+        self._transit_path  = []
+        self._move          = _Move.IDLE
+        self._mission       = _Mission.IDLE
+        self._aruco_found            = False
+        self._aruco_area             = 0.0
+        self._aruco_phase            = _ArUcoPhase.APPROACHING
+        self._aruco_approach_heading = 0.0
+        self._aruco_start_x          = 0.0
+        self._aruco_start_y          = 0.0
+        self._aruco_advance_dist     = 0.0
         self._ambush_streak = 0
-        self._us_hit       = [0] * len(SENSORS)
+        self._collecting       = False
+        self._arm_seq_idx      = 0
+        self._arm_seq_ticks    = 0
+        self._use_world_target = False
+        self._move_start_time  = None
+        self._us_hit     = [0] * len(SENSORS)
+        self._us_windows = [[] for _ in range(len(SENSORS))]
         self._row, self._col = self._start
 
         self.get_logger().info(
             f'Grille réinitialisée — départ ({self._start[0]},{self._start[1]}), '
             f'cible ({self._nav_goal[0]},{self._nav_goal[1]})'
         )
+
+    def _publish_status(self):
+        if self._pub_status is None:
+            return
+        now = self.get_clock().now()
+
+        def _age(t):
+            if t is None:
+                return '—'
+            return f'{(now - t).nanoseconds / 1e9:.1f}s'
+
+        msg = String()
+        msg.data = (
+            f'{self._mission.name} · {self._move.name} · '
+            f'({self._row},{self._col})→({self._nav_goal[0]},{self._nav_goal[1]}) · '
+            f'pose:{_age(self._last_pose_time)} us:{_age(self._last_us_time)} · '
+            f'{self._last_reason}'
+        )
+        self._pub_status.publish(msg)
 
     def _publish_grid_state(self):
         if self._pub_grid_state is None or not self._cells:
@@ -536,6 +821,107 @@ class AutonomousNode(LifecycleNode):
         msg = Int32MultiArray()
         msg.data = flat
         self._pub_grid_state.publish(msg)
+
+    def _bottle_cb(self, msg: Float32MultiArray):
+        if len(msg.data) < 2:
+            return
+        self._bottle_offset = (float(msg.data[0]), float(msg.data[1]))
+        self._compute_bottle_world()
+        self.get_logger().info(
+            f'Offset bouteille reçu : ({self._bottle_offset[0]:.0f},{self._bottle_offset[1]:.0f}) mm'
+        )
+
+    def _compute_bottle_world(self):
+        """Calcule la position monde de la bouteille depuis nav_goal + offset relatif ArUco."""
+        if self._bottle_offset is None:
+            return
+        aruco_row, aruco_col = self._nav_goal
+        aruco_x = aruco_col * CELL_COL_MM + CELL_COL_MM / 2.0
+        aruco_y = aruco_row * CELL_ROW_MM + CELL_ROW_MM / 2.0
+        rel_x, rel_y = self._bottle_offset
+        self._bottle_world = (aruco_x + rel_x, aruco_y + rel_y)
+        self.get_logger().info(
+            f'Position bouteille monde : ({self._bottle_world[0]:.0f},{self._bottle_world[1]:.0f}) mm'
+        )
+
+    def _arm_pickup_tick(self):
+        if self._arm_seq_idx >= len(ARM_PICKUP_SEQ):
+            self._collecting  = False
+            self._mission     = _Mission.RETURNING
+            self._last_reason = 'bouteille saisie — retour'
+            self.get_logger().info('Séquence bras terminée — RETURNING')
+            return
+
+        duration, cmd = ARM_PICKUP_SEQ[self._arm_seq_idx]
+        self._arm_cmd(cmd)
+        self._arm_seq_ticks += 1
+        if self._arm_seq_ticks >= duration:
+            self._arm_seq_idx   += 1
+            self._arm_seq_ticks  = 0
+
+    def _arm_cmd(self, cmd: list):
+        if self._pub_arm is None:
+            return
+        msg = Float32MultiArray()
+        msg.data = [float(v) for v in cmd]
+        self._pub_arm.publish(msg)
+
+    def _aruco_approach_tick(self):
+        if self._move_start_time is not None:
+            elapsed = (self.get_clock().now() - self._move_start_time).nanoseconds / 1e9
+            if elapsed > TIMEOUT_ARUCO_S:
+                self._stop()
+                self._mission = _Mission.COLLECTING if self._bottle_world else _Mission.RETURNING
+                self._last_reason = f'TIMEOUT ArUco {elapsed:.1f}s — {self._mission.name}'
+                self.get_logger().warn(self._last_reason)
+                return
+
+        if self._aruco_phase == _ArUcoPhase.APPROACHING:
+            # Rotation d'alignement vers l'ArUco avant d'avancer
+            delta = _norm(self._aruco_approach_heading - self._theta)
+            if abs(delta) > ANGLE_TOL_RAD:
+                spd = max(-MAX_ROT_SPEED, min(MAX_ROT_SPEED, KP_ROT * delta))
+                self._cmd(0.0, spd)
+                return
+
+            dist = sqrt((self._x - self._aruco_start_x)**2 +
+                        (self._y - self._aruco_start_y)**2)
+
+            stop_area = self._aruco_area > 0 and self._aruco_area >= ARUCO_AREA_THRESHOLD
+            if stop_area or dist >= ARUCO_MAX_ADVANCE_MM:
+                self._stop()
+                self._aruco_advance_dist = dist
+                self._aruco_phase = _ArUcoPhase.BACKING_UP
+                self._last_reason = (
+                    f'ArUco portée (aire={self._aruco_area:.0f}) avancé={dist:.0f}mm — recul'
+                )
+                self.get_logger().info(self._last_reason)
+                return
+
+            ang = KA * _norm(self._aruco_approach_heading - self._theta)
+            self._cmd(ARUCO_APPROACH_SPEED, ang)
+
+        else:  # BACKING_UP — recule jusqu'à la position de départ
+            dist_to_start = sqrt((self._x - self._aruco_start_x)**2 +
+                                 (self._y - self._aruco_start_y)**2)
+
+            if dist_to_start <= ARRIVAL_TOL_FINE_MM:
+                self._stop()
+                # Relocaliser la case courante depuis la pose odométrique
+                self._row = max(0, min(GRID_ROWS - 1, int(floor(self._y / CELL_ROW_MM))))
+                self._col = max(0, min(GRID_COLS - 1, int(floor(self._x / CELL_COL_MM))))
+                if self._bottle_world is not None:
+                    self._mission = _Mission.COLLECTING
+                    self._last_reason = 'recul ArUco terminé — COLLECTING'
+                else:
+                    self._mission = _Mission.RETURNING
+                    self._last_reason = 'recul ArUco terminé — RETURNING'
+                self.get_logger().info(self._last_reason)
+                return
+
+            # Reculer en maintenant le cap vers l'ArUco
+            ang = KA * _norm(self._aruco_approach_heading - self._theta)
+            self._cmd(-ARUCO_APPROACH_SPEED, ang)
 
     def _stop(self):
         self._cmd(0.0, 0.0)
