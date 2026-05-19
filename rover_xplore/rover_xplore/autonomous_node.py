@@ -108,6 +108,7 @@ class AutonomousNode(LifecycleNode):
         self._x     = 0.0
         self._y     = 0.0
         self._theta = 0.0
+        self._start = START        # mis à jour par /rover/nav_goal [start_r, start_c, tgt_r, tgt_c]
         self._row   = START[0]
         self._col   = START[1]
 
@@ -221,7 +222,18 @@ class AutonomousNode(LifecycleNode):
     def _nav_goal_cb(self, msg: Int32MultiArray):
         if len(msg.data) < 2:
             return
-        row, col = int(msg.data[0]), int(msg.data[1])
+        if len(msg.data) >= 4:
+            # Format 4 valeurs : [start_row, start_col, target_row, target_col]
+            sr, sc = int(msg.data[0]), int(msg.data[1])
+            row, col = int(msg.data[2]), int(msg.data[3])
+            if not (0 <= sr < GRID_ROWS and 0 <= sc < GRID_COLS):
+                self.get_logger().warn(f'start hors grille : ({sr},{sc}) — ignoré')
+                return
+            self._start = (sr, sc)
+            self._row, self._col = sr, sc
+        else:
+            # Format 2 valeurs (rétrocompatibilité) : [target_row, target_col]
+            row, col = int(msg.data[0]), int(msg.data[1])
         if not (0 <= row < GRID_ROWS and 0 <= col < GRID_COLS):
             self.get_logger().warn(f'nav_goal hors grille : ({row},{col}) — ignoré')
             return
@@ -229,7 +241,10 @@ class AutonomousNode(LifecycleNode):
         self._reset()
         self._recalc_priorities(row, col)
         self._mission = _Mission.EXPLORING
-        self.get_logger().info(f'nav_goal reçu ({row},{col}) — EXPLORING')
+        self.get_logger().info(
+            f'nav_goal reçu — départ ({self._start[0]},{self._start[1]}) '
+            f'cible ({row},{col}) — EXPLORING'
+        )
 
     # ── Boucle principale 10 Hz ───────────────────────────────────────────────
 
@@ -260,7 +275,7 @@ class AutonomousNode(LifecycleNode):
                 return   # prochain tick relancera _nav_step en RETURNING
 
         if self._mission == _Mission.RETURNING:
-            if self._row == START[0] and self._col == START[1]:
+            if self._row == self._start[0] and self._col == self._start[1]:
                 self.get_logger().info('Retour au départ — DONE')
                 self._mission = _Mission.DONE
                 self._stop()
@@ -276,7 +291,7 @@ class AutonomousNode(LifecycleNode):
         if self._mission == _Mission.EXPLORING:
             path = self._bfs_best_undiscovered(self._row, self._col)
         else:
-            path = self._bfs_to(self._row, self._col, START[0], START[1])
+            path = self._bfs_to(self._row, self._col, self._start[0], self._start[1])
 
         if path is None or len(path) < 2:
             if self._mission == _Mission.RETURNING:
@@ -507,7 +522,7 @@ class AutonomousNode(LifecycleNode):
         self._aruco_found  = False
         self._ambush_streak = 0
         self._us_hit       = [0] * len(SENSORS)
-        self._row, self._col = START
+        self._row, self._col = self._start
 
         self.get_logger().info(
             f'Grille réinitialisée — départ ({START[0]},{START[1]}), '
