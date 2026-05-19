@@ -36,23 +36,38 @@ Communication : ROS2 DDS via réseau local (même subnet, ROS_DOMAIN_ID identiqu
 
 Protocole défini avec l'équipe élec — structs binaires little-endian via UART/USB.
 
-### `data_from_rasberry` — Pi → Micro (18 octets)
-```c
-struct data_from_rasberry {
-    uint16_t servo_1, servo_2, servo_3, servo_4;   // 4 × uint16
-    int16_t  motor1_speed, motor2_speed, motor3_speed, motor4_speed;  // 4 × int16
-    int16_t  stepper;                               // 1 × int16
-};  // total : 18 octets, format Python : "<4H5h"
+**Protocole request-response** : l'ESP32 n'envoie QUE quand il reçoit une trame valide du Pi.
+
+### Framing — magic word `"rover"`
+
+Chaque trame (dans les deux sens) est précédée du mot `rover` (5 octets ASCII) :
+
+```
+Pi → ESP32 :  [r][o][v][e][r] + 18 octets struct  = 23 octets
+ESP32 → Pi :  [r][o][v][e][r] + 30 octets struct  = 35 octets
 ```
 
-### `data_for_rasberry` — Micro → Pi (30 octets)
+Le récepteur scanne le flux octet par octet jusqu'à reconnaître `rover`, puis lit les N octets suivants. Garantit la resynchronisation automatique après reset, bruit UART ou buffer overflow — sans intervention manuelle.
+
+`"rover"` est mathématiquement impossible dans les données Pi→ESP32 (toutes les valeurs sont clampées à -100..100, les bytes ASCII de `rover` sont dans la plage 0x65..0x9B qui ne peut pas apparaître dans ce range).
+
+### `data_from_rasberry` — Pi → ESP32 (18 octets)
+```c
+struct data_from_rasberry {
+    int16_t servo_1, servo_2, servo_3, servo_4;    // 4 × int16 (-100..100)
+    int16_t motor1_speed, motor2_speed, motor3_speed, motor4_speed;  // 4 × int16 (-100..100)
+    int16_t stepper;                                // 1 × int16 (-1 / 0 / +1)
+};  // total : 18 octets, format Python : "<9h"
+```
+
+### `data_for_rasberry` — ESP32 → Pi (30 octets)
 ```c
 struct data_for_rasberry {
-    uint16_t accel_x, accel_y, accel_z;            // IMU accéléromètre
-    uint16_t gyro_x, gyro_y, gyro_z;               // IMU gyroscope
+    int16_t  accel_x, accel_y, accel_z;            // IMU accéléromètre (×100)
+    int16_t  gyro_x, gyro_y, gyro_z;               // IMU gyroscope (×100)
     int16_t  motor1_speed, motor2_speed, motor3_speed, motor4_speed;  // encodeurs roues
-    uint16_t distance_1, distance_2, distance_3, distance_4, distance_5;  // 5 US
-};  // total : 30 octets, format Python : "<6H4h5H"
+    uint16_t distance_1, distance_2, distance_3, distance_4, distance_5;  // 5 US (cm)
+};  // total : 30 octets, format Python : "<10h5H"
 ```
 
 > **À confirmer avec team élec :** disposition des 4 moteurs (gauche/droite ou avant/arrière), port série (`/dev/ttyUSB0`), baudrate.
@@ -426,15 +441,15 @@ ros2 launch rover_xplore rover.launch.py
 | `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — LifecycleNode. Cinématique diff → `/rover/motor_cmd` Int32[FR,FL,BR,BL] (-255..255). Timeout 500ms. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/arm_node.py` | Prêt — LifecycleNode. Reçoit `/rover/arm_cmd` Float32[z,s1_angle,s23_angle,speed,dump,s4_angle] → `/rover/arm_serial_cmd` Int32[s1,s2,s3,s4,stepper]. Angles servos envoyés directs (le GUI accumule), stepper reste directionnel. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/aruco_node.py` | Prêt — LifecycleNode. Détection ArUco sur `/camera/image_raw` (bgr8 non compressé). Publie `/aruco_detected` Float32[found,id,cx,cy,area]. |
-| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. `_FMT_SEND='<9h'` (9×int16), `_FMT_RECV='<10h5H'` (IMU+ENC int16, US uint16), aligné avec les types Arduino (`int16_t`/`uint16_t`). **Envoi immédiat sur réception commande** (latence ~0ms côté bridge) + timer 10 Hz pour sécurité/heartbeat. Reconnexion automatique USB. Timeout 1s moteurs. |
+| `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. `_FMT_SEND='<9h'` (9×int16), `_FMT_RECV='<10h5H'` (IMU+ENC int16, US uint16). **Magic word `"rover"` en tête de chaque trame** (Pi→ESP32 et ESP32→Pi) — resync automatique après reset ou bruit UART. **Envoi immédiat sur réception commande** + timer 10 Hz heartbeat. Reconnexion automatique USB. Timeout 1s moteurs. |
 | `rover_xplore/launch/rover.launch.py` | Prêt — lance tous les nodes sauf camera_node (natif). |
-| `rover_xplore/rover_xplore/autonomous_node.py` | À créer — grille BFS + machine à états, s'abonne `/rover/nav_goal`, publie `/rover/grid_state` + `/rover/grid_pos` |
+| `rover_xplore/rover_xplore/autonomous_node.py` | Prêt — grille 12×8 + BFS + machine à états (IDLE→EXPLORING→RETURNING→DONE). Reçoit `/rover/nav_goal` [start_r, start_c, target_r, target_c] — position de départ dynamique. Publie `/rover/grid_state` + `/rover/grid_pos`. `self._start` mis à jour depuis le nav_goal (plus de constante hardcodée). |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
 
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8 interactive, BFS simulé. **ArmPage** : angles servos accumulés localement, affichage numérique (+75/-30/0), boutons reset individuel par servo, vue rover top-down avec vitesses roues. **RacePage** : idem vue rover top-down. **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. Fix : `keyReleaseEvent` sans filtre `isAutoRepeat` (Linux/X11 marquait le dernier release comme autorepeat → moteurs ne stoppaient jamais). Fix : touches I/P pivot bras inversées. |
+| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8, bouton DÉPART (cyan) + bouton CIBLE (vert) pour placer S et T par clic, marqueur B (orange) pour la bouteille, monitoring ROS temps réel (`/rover/grid_state` + `/rover/grid_pos`). **Carte bouteille** : saisie offset X/Y/Z en mm depuis l'ArUco (donné le jour J) → calcule la case grille et affiche B. **USSensorsCard** + **IMUCard** : branchées sur `/ultrasonic` et `/imu/raw` (valeurs IMU ÷100, accel en g, gyro en °/s). **QPalette sombre** : fond dark imposé sur tous les widgets y compris QDoubleSpinBox (fix Ubuntu/GTK). **ArmPage** : angles servos accumulés, reset individuel, vue rover top-down. **RacePage** : idem. **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. |
 | `rover_xplore_pub/rover_xplore_pub/diag_node.py` | **Nouveau — dashboard terminal diagnostic.** Deux colonnes côte à côte : REÇU (IMU accel/gyro, encodeurs, US) \| ENVOYÉ (moteurs, servos+stepper). Rafraîchissement 10 Hz. Lancer : `ros2 run rover_xplore_pub diag_node` |
 | `rover_xplore_pub/rover_xplore_pub/xplore_logo.jpg` | Logo EPFL XPlore intégré dans la GUI (format paysage, fond #0C1427) |
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Fallback terminal — toujours dispo (`ros2 run rover_xplore_pub controller_node`) |
@@ -489,41 +504,42 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 
 | # | Fichier | Problème | Fix |
 |---|---------|----------|-----|
-| 1 | `serial_bridge_node` | Pas de framing serial avec l'Arduino — si l'Arduino reboot ou envoie des données corrompues, la struct peut être décodée n'importe comment | Ajouter un byte de début de trame côté Arduino + vérification côté Pi (à coordonner avec l'équipe élec) |
+| 1 | `serial_bridge_node` | ~~Pas de framing serial~~ | **✅ Résolu** — magic word `"rover"` (5 octets) en tête de chaque trame dans les deux sens. ESP32 : state machine octet par octet. Pi : `rfind(b'rover')` sur le buffer. |
 | 2 | `mode_manager_node` | `time.sleep(2.0)` au démarrage avant de configurer les nodes lifecycle — fragile si le système est lent | Remplacer par une boucle de polling qui vérifie la disponibilité des services sans sleep fixe |
 | 3 | `camera_node` | Gère son mode en interne (subscribe à `/rover/mode`) alors que tous les autres sont lifecycle — incohérence architecturale | Réécrire en LifecycleNode quand libcamera sera mieux maîtrisé |
 | 4 | Tous | Zéro tests automatisés | Ajouter des tests unitaires sur la cinématique diff, le mapping arm, le packing/unpacking de la struct serial |
-| 5 | `rover_gui.py` — `MapWidget` | La navigation BFS est simulée côté PC uniquement — les topics `/rover/nav_goal`, `/rover/grid_state`, `/rover/grid_pos` ne sont pas encore implémentés côté RPi | Implémenter un nœud `nav_node` sur le RPi qui publie l'état de la grille et reçoit les objectifs de navigation |
+| 5 | `rover_gui.py` — `MapWidget` | ~~La navigation BFS est simulée côté PC uniquement~~ | **✅ Résolu** — MapWidget monitore `/rover/grid_state` + `/rover/grid_pos` en temps réel. `autonomous_node` tourne côté RPi. |
 | 6 | `xplore_pub` Docker | PySide6 et `libxcb-cursor0` doivent être réinstallés à chaque redémarrage du container (pas de persistence) | Ajouter `RUN pip install PySide6 && apt-get install -y libxcb-cursor0` dans le Dockerfile pour éviter les steps manuels |
 
 ---
 
-## Prochaine session — à implémenter
+## Ce qui reste à faire
 
-### 1. `odometry_node.py` (priorité)
-Architecture complète documentée dans `autonome.md`.
-- Dead-reckoning encodeurs + filtre complémentaire gyro (MPU9250)
-- Publie `/rover/pose` [x_mm, y_mm, theta_rad] + `/rover/grid_pos` [col, row]
-- Service `/rover/reset_pose` (std_srvs/Trigger)
-- Plan détaillé : `/Users/hadyazzi/.claude/plans/virtual-chasing-bear.md`
-- Fichiers à modifier : `rover_xplore/rover_xplore/odometry_node.py` (créer), `setup.py`, `package.xml`, `rover.launch.py`
+### Priorité 1 — Calibration physique (avec team élec)
+- `TICKS_PER_REV` encodeurs : faire avancer 1000mm, comparer avec `/rover/pose`
+- `WHEEL_BASE_MM` : tester rotation 360°, mesurer erreur angulaire
+- Confirmer mapping d1..d5 → position physique des capteurs US (FL/FC/FR/L/R)
+- Confirmer unités IMU réelles (accel en g confirmé via code ESP32 `getAccX()*100`)
 
-### 2. `autonomous_node.py`
-Architecture complète dans `autonome.md` (sections 4, 5, 9, 10).
-- BFS + PID navigation case à case
-- Souscrit `/rover/pose` + `/rover/grid_pos` + `/aruco_detected` + `/ultrasonic`
-- Publie `/rover/cmd_vel` + `/rover_status` + `/rover/grid_state`
-- États : IDLE → EXPLORING → VISUAL_ALIGNING → VISUAL_APPROACHING → ARUCO_REACHED → RETURNING → DONE
+### Priorité 2 — VISUAL_APPROACH (TODO dans autonomous_node)
+- État entre EXPLORING et RETURNING quand ArUco détecté à portée
+- Asservissement : `cx - IMAGE_W/2` → angular.z, US d2 < STOP_MM → arrêt
+- Constante AREA_NEAR à calibrer avec la caméra réelle
 
-### 3. PID moteurs (feedback encodeurs)
-- Boucle fermée dans `motor_controller_node` sur `/wheel_encoders`
-- Actuellement : PWM brut sans feedback
+### Priorité 3 — Tests intégration
+- Tester odométrie : `/rover/pose` + `/rover/grid_pos` avec rover qui se déplace
+- Tester nav_goal depuis GUI : placer DÉPART + CIBLE → START → observer navigation RPi
 
-### Notes approche ArUco finale
-- Phase 1 : BFS vers case approx. donnée par opérateur avant mission
-- Phase 2 (visuelle) : `cx - 320` pour bearing, US d2 < 300mm pour stop
-- Option C (pose estimation tvec) documentée mais non implémentée — nécessite calibration caméra + taille marker physique
+### Priorité 4 — Améliorations non bloquantes
+- PID moteurs en boucle fermée (`motor_controller_node` sur `/wheel_encoders`)
+- Ajouter `PySide6` + `libxcb-cursor0` dans le Dockerfile PC (évite réinstall à chaque redémarrage)
+- Remplacer `time.sleep(2.0)` dans `mode_manager_node` par polling de disponibilité
+
+### Specs clarifiées (2026-05-19)
+- **1 seule bouteille** à ramasser (position donnée le jour J en offset mm depuis l'ArUco)
+- **Scotch au sol** : non pertinent — les cases BORDER dans la grille suffisent comme limite
+- **Position bouteille** : saisie dans la GUI (carte bouteille), affichage marqueur B sur la carte
 
 ---
 
-*Dernière mise à jour : 2026-05-15 (session 19 — test élec + validation comm série. Fix structs : `_FMT_SEND '<9h'`, `_FMT_RECV '<10h5H'` alignés avec types Arduino int16_t/uint16_t. Fix GUI : keyReleaseEvent sans isAutoRepeat (moteurs ne stoppaient plus sur Linux/X11), touches I/P pivot bras inversées. Perf serial_bridge : envoi immédiat sur réception commande. Nouveau : diag_node terminal deux colonnes REÇU|ENVOYÉ 10 Hz. Prochaine session : coder odometry_node.py)*
+*Dernière mise à jour : 2026-05-19 (session 21 — GUI : bouton DÉPART cliquable sur la carte, marqueur bouteille B avec saisie offset mm ArUco, USSensorsCard + IMUCard branchées sur `/ultrasonic` + `/imu/raw`, QPalette sombre pour Ubuntu/GTK. autonomous_node : `self._start` dynamique depuis nav_goal 4 valeurs `[sr,sc,tr,tc]`. IMU accel confirmée en g via code ESP32 `getAccX()*100`.)*

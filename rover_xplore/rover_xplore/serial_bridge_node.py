@@ -1,24 +1,28 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # serial_bridge_node.py — Raspberry Pi
 #
-# RÔLE : pont binaire exclusif entre ROS2 et l'Arduino via UART/USB.
+# RÔLE : pont binaire exclusif entre ROS2 et l'ESP32 via UART/USB.
 #         Seul propriétaire du port série — aucun autre node ne touche au port.
 #         Toujours actif, indépendant du mode.
 #
-# ENVOI (Pi → Micro) à 10 Hz — struct 18 octets little-endian :
+# PROTOCOLE request-response : l'ESP32 n'envoie QUE quand il reçoit.
+#   → Le Pi envoie une trame, l'ESP32 répond immédiatement.
+#
+# ENVOI (Pi → ESP32) à 10 Hz — [0xAA][0x55] + struct 18 octets little-endian :
 #   int16  servo_1, servo_2, servo_3, servo_4   (-100..100)
 #   int16  motor1..4                             (-100..100)
 #   int16  stepper                               (-1 / 0 / +1)
 #
-# RÉCEPTION (Micro → Pi) à chaque tick — struct 30 octets :
+# RÉCEPTION (ESP32 → Pi) — [0xAA][0x55] + struct 30 octets :
 #   int16  accel_x/y/z, gyro_x/y/z             (IMU brut, signé)
 #   int16  motor1..4                             (vitesses encodeurs roues)
 #   uint16 distance_1..5                         (US en cm)
 #
 # SÉCURITÉ :
+#   Magic bytes 0xAA 0x55 en tête de chaque trame (Pi→ESP32 et ESP32→Pi).
+#   Le récepteur cherche ce marqueur avant de décoder — alignement garanti
+#   même après reset, bruit UART ou buffer overflow.
 #   Si aucun motor_cmd reçu depuis MOTOR_TIMEOUT_S → moteurs forcés à zéro.
-#   Les nodes motor_controller et arm_node publient leurs zeros lors de leur
-#   désactivation lifecycle, donc ce timeout est une sécurité supplémentaire.
 #
 # TOPICS ÉCOUTÉS :
 #   /rover/motor_cmd      Int32MultiArray [m1, m2, m3, m4]       (-100..100)
@@ -39,9 +43,10 @@ from std_msgs.msg import Float32MultiArray, Int32MultiArray
 
 import serial
 
-_FMT_SEND  = '<9h'      # 18 octets : 9 × int16 (servos×4, motors×4, stepper)
-_FMT_RECV  = '<10h5H'  # 30 octets : 10 × int16 (IMU×6, encodeurs×4) + 5 × uint16 (US)
-_SIZE_RECV = struct.calcsize(_FMT_RECV)
+_MAGIC     = b'rover'
+_FMT_SEND  = '<9h'                          # 18 octets : 9 × int16
+_FMT_RECV  = '<10h5H'                       # 30 octets : 10 × int16 + 5 × uint16
+_SIZE_DATA = struct.calcsize(_FMT_RECV)     # 30
 
 MOTOR_TIMEOUT_S = 1.0   # sécurité : zéro moteurs si plus de commande depuis 1s
 
@@ -135,7 +140,7 @@ class SerialBridgeNode(Node):
         if not self._ser or not self._ser.is_open:
             return
 
-        payload = struct.pack(
+        payload = _MAGIC + struct.pack(
             _FMT_SEND,
             self._servos[0], self._servos[1], self._servos[2], self._servos[3],
             self._motors[0], self._motors[1], self._motors[2], self._motors[3],
@@ -156,22 +161,25 @@ class SerialBridgeNode(Node):
 
         try:
             available = self._ser.in_waiting
-            if available < _SIZE_RECV:
+            if available < len(_MAGIC) + _SIZE_DATA:
                 return
 
-            # Lire TOUT le buffer d'un seul appel pour éviter les trames partielles
-            # qui resteraient en attente et corrompent les lectures suivantes.
             all_data = self._ser.read(available)
-            n_complete = len(all_data) // _SIZE_RECV
-            if n_complete == 0:
+
+            # Cherche la dernière occurrence du magic (trame la plus récente).
+            # Fonctionne même si le buffer contient plusieurs trames ou des
+            # octets parasites — pas besoin d'alignement préalable.
+            idx = all_data.rfind(_MAGIC)
+            if idx == -1:
                 return
 
-            # Prendre la dernière trame complète (la plus récente).
-            # Les octets partiels en fin de buffer sont consommés et jetés —
-            # le prochain appel lira uniquement de nouvelles données de l'Arduino.
-            raw = all_data[(n_complete - 1) * _SIZE_RECV : n_complete * _SIZE_RECV]
+            data_start = idx + len(_MAGIC)
+            if len(all_data) - data_start < _SIZE_DATA:
+                return  # trame incomplète après le magic
 
-            vals                   = struct.unpack(_FMT_RECV, raw)
+            raw  = all_data[data_start : data_start + _SIZE_DATA]
+            vals = struct.unpack(_FMT_RECV, raw)
+
             ax, ay, az, gx, gy, gz = vals[0:6]
             m1, m2, m3, m4         = vals[6:10]
             d1, d2, d3, d4, d5     = vals[10:15]
