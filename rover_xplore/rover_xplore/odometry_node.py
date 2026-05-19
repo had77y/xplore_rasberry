@@ -10,6 +10,7 @@
 # TOPICS ÉCOUTÉS :
 #   /wheel_encoders  Int32MultiArray  [FR, FL, BR, BL]  Δticks / 100ms
 #   /imu/raw         sensor_msgs/Imu  angular_velocity.z (LSB int16 MPU9250)
+#   /rover/nav_goal  Int32MultiArray  [start_row, start_col, target_row, target_col]
 #
 # TOPICS PUBLIÉS :
 #   /rover/pose      Float32MultiArray  [x_mm, y_mm, theta_rad]
@@ -19,7 +20,7 @@
 #   /rover/reset_pose  std_srvs/Trigger  → remet (x, y, θ) à zéro
 # ══════════════════════════════════════════════════════════════════════════════
 
-from math import atan2, cos, floor, pi, sin
+from math import atan2, floor, pi, sin
 
 import rclpy
 from rclpy.node import Node
@@ -66,6 +67,7 @@ class OdometryNode(Node):
 
         self.create_subscription(Int32MultiArray, '/wheel_encoders', self._enc_cb, 10)
         self.create_subscription(Imu,             '/imu/raw',        self._imu_cb, 10)
+        self.create_subscription(Int32MultiArray, '/rover/nav_goal', self._nav_goal_cb, 10)
 
         self.create_service(Trigger, '/rover/reset_pose', self._reset_cb)
 
@@ -112,13 +114,34 @@ class OdometryNode(Node):
 
         dθ = ALPHA * dθ_gyro + (1.0 - ALPHA) * dθ_enc
 
-        # Intégration midpoint heading (plus précis dans les virages)
+        # Intégration midpoint heading.
+        # Convention grille : theta=0 pointe vers row+1 (axe y positif).
         mid = self._theta + dθ / 2.0
-        self._x    += d_center * cos(mid)
-        self._y    += d_center * sin(mid)
+        self._x    += d_center * sin(mid)
+        self._y    += d_center * cos(mid)
         self._theta = atan2(sin(self._theta + dθ), cos(self._theta + dθ))
 
         self._publish()
+
+    # ── Navigation goal ──────────────────────────────────────────────────────
+
+    def _nav_goal_cb(self, msg: Int32MultiArray):
+        if len(msg.data) < 4:
+            return
+
+        start_row = int(msg.data[0])
+        start_col = int(msg.data[1])
+        if not (0 <= start_row < GRID_ROWS and 0 <= start_col < GRID_COLS):
+            self.get_logger().warn(f'nav_goal start hors grille : ({start_row},{start_col})')
+            return
+
+        self._x = start_col * CELL_COL_MM + CELL_COL_MM / 2.0
+        self._y = start_row * CELL_ROW_MM + CELL_ROW_MM / 2.0
+        self._theta = 0.0
+        self._publish()
+        self.get_logger().info(
+            f'Pose alignée sur départ nav_goal : row={start_row}, col={start_col}'
+        )
 
     # ── Publication ───────────────────────────────────────────────────────────
 

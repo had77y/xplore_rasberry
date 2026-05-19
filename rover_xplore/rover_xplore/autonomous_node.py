@@ -14,7 +14,7 @@
 #   Sous-états de mouvement : ROTATING → MOVING → IDLE → (nav_step)
 #
 # TOPICS ÉCOUTÉS (uniquement en Active) :
-#   /rover/nav_goal  Int32MultiArray    [row, col]  — cible envoyée par le GUI
+#   /rover/nav_goal  Int32MultiArray    [start_row, start_col, target_row, target_col]
 #   /rover/pose      Float32MultiArray  [x_mm, y_mm, theta_rad]
 #   /rover/grid_pos  Int32MultiArray    [col, row]
 #   /aruco_detected  Float32MultiArray  [found, id, cx, cy, area]
@@ -525,7 +525,7 @@ class AutonomousNode(LifecycleNode):
         self._row, self._col = self._start
 
         self.get_logger().info(
-            f'Grille réinitialisée — départ ({START[0]},{START[1]}), '
+            f'Grille réinitialisée — départ ({self._start[0]},{self._start[1]}), '
             f'cible ({self._nav_goal[0]},{self._nav_goal[1]})'
         )
 
