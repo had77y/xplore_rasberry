@@ -639,10 +639,10 @@ class AutonomousNode(LifecycleNode):
 
     def _mark_obstacle(self, sx: float, sy: float, sa: float, d: float):
         th = self._theta
-        wx = self._x + sx * cos(th) - sy * sin(th)
-        wy = self._y + sx * sin(th) + sy * cos(th)
-        ox = wx + d * cos(th + sa)
-        oy = wy + d * sin(th + sa)
+        wx = self._x + sx * sin(th) - sy * cos(th)
+        wy = self._y + sx * cos(th) + sy * sin(th)
+        ox = wx + d * sin(th - sa)
+        oy = wy + d * cos(th - sa)
 
         obs_r = int(floor(oy / CELL_ROW_MM))
         obs_c = int(floor(ox / CELL_COL_MM))

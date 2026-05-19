@@ -135,6 +135,8 @@ Menu principal (souris)
 | `/ultrasonic` | `std_msgs/Float32MultiArray` | RPi → RPi | `[d1, d2, d3, d4, d5]` en cm — publié par serial_bridge_node |
 | `/imu/raw` | `sensor_msgs/Imu` | RPi → RPi | accel + gyro bruts — publié par serial_bridge_node |
 | `/wheel_encoders` | `std_msgs/Int32MultiArray` | RPi → RPi | `[m1, m2, m3, m4]` vitesses encodeurs — publié par serial_bridge_node |
+| `/rover/bottle_pos` | `std_msgs/Float32MultiArray` | PC → RPi | `[rel_x_mm, rel_y_mm]` offset bouteille depuis centre case ArUco — saisi dans la GUI |
+| `/rover_status` | `std_msgs/String` | RPi → PC | État machine autonome (mission·move·pos·âge capteurs·raison) — 2 Hz |
 
 ### Modes reconnus par mode_manager_node (RPi)
 | Mode | Action RPi |
@@ -438,18 +440,18 @@ ros2 launch rover_xplore rover.launch.py
 |---------|------|
 | `rover_xplore/rover_xplore/camera_node.py` | Prêt — picamera2 (libcamera) + cv2, double pub `/camera/image_raw` (bgr8, pour aruco) + `/camera/image_compressed` (JPEG, pour FPV), fallback V4L2. **Lance nativement hors Docker.** |
 | `rover_xplore/rover_xplore/mode_manager_node.py` | Prêt — orchestrateur lifecycle. Queue + worker thread unique (pas de race condition). Configure les nodes au démarrage, active/désactive selon le mode reçu sur `/rover/mode`. |
-| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — LifecycleNode. Cinématique diff → `/rover/motor_cmd` Int32[FR,FL,BR,BL] (-255..255). Timeout 500ms. Zeros garantis à Ctrl+C. |
+| `rover_xplore/rover_xplore/motor_controller_node.py` | Prêt — LifecycleNode. **PI fermé par roue** sur `/wheel_encoders` (Δticks/100ms). Cinématique diff → setpoints → PI (KP=1.5, KI=0.3, anti-windup=40) → `/rover/motor_cmd` Int32[FR,FL,BR,BL] (-100..100). **Note :** sans ESP32 branché, `/rover/motor_cmd` n'est pas publié (PI attend les encodeurs). Timeout 500ms. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/arm_node.py` | Prêt — LifecycleNode. Reçoit `/rover/arm_cmd` Float32[z,s1_angle,s23_angle,speed,dump,s4_angle] → `/rover/arm_serial_cmd` Int32[s1,s2,s3,s4,stepper]. Angles servos envoyés directs (le GUI accumule), stepper reste directionnel. Zeros garantis à Ctrl+C. |
 | `rover_xplore/rover_xplore/aruco_node.py` | Prêt — LifecycleNode. Détection ArUco sur `/camera/image_raw` (bgr8 non compressé). Publie `/aruco_detected` Float32[found,id,cx,cy,area]. |
 | `rover_xplore/rover_xplore/serial_bridge_node.py` | Prêt — pont binaire 10 Hz. `_FMT_SEND='<9h'` (9×int16), `_FMT_RECV='<10h5H'` (IMU+ENC int16, US uint16). **Magic word `"rover"` en tête de chaque trame** (Pi→ESP32 et ESP32→Pi) — resync automatique après reset ou bruit UART. **Envoi immédiat sur réception commande** + timer 10 Hz heartbeat. Reconnexion automatique USB. Timeout 1s moteurs. |
 | `rover_xplore/launch/rover.launch.py` | Prêt — lance tous les nodes sauf camera_node (natif). |
-| `rover_xplore/rover_xplore/autonomous_node.py` | Prêt — grille 12×8 + BFS + machine à états (IDLE→EXPLORING→RETURNING→DONE). Reçoit `/rover/nav_goal` [start_r, start_c, target_r, target_c] — position de départ dynamique. Publie `/rover/grid_state` + `/rover/grid_pos`. `self._start` mis à jour depuis le nav_goal (plus de constante hardcodée). |
+| `rover_xplore/rover_xplore/autonomous_node.py` | Prêt — grille 12×8 + BFS + **machine à états complète** : IDLE → EXPLORING → ARUCO_APPROACH → COLLECTING → RETURNING → DONE. ARUCO_APPROACH : approche visuelle lente (seuil aire px², recul même distance). COLLECTING : fine alignment monde + séquence bras ARM_PICKUP_SEQ. RETURNING : BFS free-only (cases visitées) + fallback général. Débounce US sliding median (fenêtre 3). Rampe décélération DECEL_START_MM→MIN_SPEED. Timeouts indépendants rotation(7s)/move(12s)/fine-align(8s)/aruco(25s). Stale pose > 1 s → arrêt d'urgence. `/rover/bottle_pos` → calcul `_bottle_world` depuis offset ArUco. `/rover_status` observable (2 Hz). |
 | `rover_xplore/rover_xplore/teleop_receiver_node.py` | Supprimé — remplacé par motor_controller_node |
 
 ### Repo PC (`xplore_pub`)
 | Fichier | État |
 |---------|------|
-| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8, bouton DÉPART (cyan) + bouton CIBLE (vert) pour placer S et T par clic, marqueur B (orange) pour la bouteille, monitoring ROS temps réel (`/rover/grid_state` + `/rover/grid_pos`). **Carte bouteille** : saisie offset X/Y/Z en mm depuis l'ArUco (donné le jour J) → calcule la case grille et affiche B. **USSensorsCard** + **IMUCard** : branchées sur `/ultrasonic` et `/imu/raw` (valeurs IMU ÷100, accel en g, gyro en °/s). **QPalette sombre** : fond dark imposé sur tous les widgets y compris QDoubleSpinBox (fix Ubuntu/GTK). **ArmPage** : angles servos accumulés, reset individuel, vue rover top-down. **RacePage** : idem. **Animations** : GlowCard, GlowButton, PulsingDot, footer dynamique. |
+| `rover_xplore_pub/rover_xplore_pub/rover_gui.py` | **Prêt — GUI PySide6 unifiée.** Menu → Téléop (Race / Bras) ou Autonome. **MapWidget** : grille 12×8, bouton DÉPART (cyan) + bouton CIBLE (vert) pour placer S et T par clic, marqueur B (orange) pour la bouteille, monitoring ROS temps réel (`/rover/grid_state` + `/rover/grid_pos`). **Carte bouteille** : saisie offset X/Y/Z en mm depuis l'ArUco (donné le jour J) → calcule la case grille, affiche B **et publie `/rover/bottle_pos`** vers RPi (bouton VALIDER). **USSensorsCard** + **IMUCard** : branchées sur `/ultrasonic` et `/imu/raw`. **QPalette sombre** : fix Ubuntu/GTK. **ArmPage** : angles servos accumulés, reset individuel. Zeros moteurs + bras publiés à la sortie de la page. |
 | `rover_xplore_pub/rover_xplore_pub/diag_node.py` | **Nouveau — dashboard terminal diagnostic.** Deux colonnes côte à côte : REÇU (IMU accel/gyro, encodeurs, US) \| ENVOYÉ (moteurs, servos+stepper). Rafraîchissement 10 Hz. Lancer : `ros2 run rover_xplore_pub diag_node` |
 | `rover_xplore_pub/rover_xplore_pub/xplore_logo.jpg` | Logo EPFL XPlore intégré dans la GUI (format paysage, fond #0C1427) |
 | `rover_xplore_pub/rover_xplore_pub/controller_node.py` | Fallback terminal — toujours dispo (`ros2 run rover_xplore_pub controller_node`) |
@@ -516,30 +518,22 @@ source install/setup.bash && ros2 run rover_xplore_pub rover_gui
 ## Ce qui reste à faire
 
 ### Priorité 1 — Calibration physique (avec team élec)
-- `TICKS_PER_REV` encodeurs : faire avancer 1000mm, comparer avec `/rover/pose`
-- `WHEEL_BASE_MM` : tester rotation 360°, mesurer erreur angulaire
+- `KP=1.5`, `KI=0.3` PI moteurs : ajuster sur le vrai rover (oscillations / lenteur)
+- `TICKS_PER_REV=1320`, `WHEEL_DIAMETER_MM=120`, `WHEEL_BASE=250mm` : faire avancer 1000mm + rotation 360°, comparer avec `/rover/pose`
+- `ARUCO_AREA_THRESHOLD=5000` px² : mesurer l'aire détectée à exactement 1m avec la caméra
+- `ARM_PICKUP_SEQ` durées : calibrer descente / fermeture pince / montée sur le vrai bras
+- `GYRO_Z_SCALE` : vérifier que la config MPU9250 ESP32 est bien ±250°/s (131 LSB/°/s)
 - Confirmer mapping d1..d5 → position physique des capteurs US (FL/FC/FR/L/R)
-- Confirmer unités IMU réelles (accel en g confirmé via code ESP32 `getAccX()*100`)
 
-### Priorité 2 — VISUAL_APPROACH (TODO dans autonomous_node)
-- État entre EXPLORING et RETURNING quand ArUco détecté à portée
-- Asservissement : `cx - IMAGE_W/2` → angular.z, US d2 < STOP_MM → arrêt
-- Constante AREA_NEAR à calibrer avec la caméra réelle
-
-### Priorité 3 — Tests intégration
+### Priorité 2 — Tests intégration
 - Tester odométrie : `/rover/pose` + `/rover/grid_pos` avec rover qui se déplace
 - Tester nav_goal depuis GUI : placer DÉPART + CIBLE → START → observer navigation RPi
+- Tester `/rover_status` dans la GUI : vérifier que l'état est lisible en autonome
 
-### Priorité 4 — Améliorations non bloquantes
-- PID moteurs en boucle fermée (`motor_controller_node` sur `/wheel_encoders`)
+### Priorité 3 — Améliorations non bloquantes
 - Ajouter `PySide6` + `libxcb-cursor0` dans le Dockerfile PC (évite réinstall à chaque redémarrage)
 - Remplacer `time.sleep(2.0)` dans `mode_manager_node` par polling de disponibilité
 
-### Specs clarifiées (2026-05-19)
-- **1 seule bouteille** à ramasser (position donnée le jour J en offset mm depuis l'ArUco)
-- **Scotch au sol** : non pertinent — les cases BORDER dans la grille suffisent comme limite
-- **Position bouteille** : saisie dans la GUI (carte bouteille), affichage marqueur B sur la carte
-
 ---
 
-*Dernière mise à jour : 2026-05-19 (session 21 — GUI : bouton DÉPART cliquable sur la carte, marqueur bouteille B avec saisie offset mm ArUco, USSensorsCard + IMUCard branchées sur `/ultrasonic` + `/imu/raw`, QPalette sombre pour Ubuntu/GTK. autonomous_node : `self._start` dynamique depuis nav_goal 4 valeurs `[sr,sc,tr,tc]`. IMU accel confirmée en g via code ESP32 `getAccX()*100`.)*
+*Dernière mise à jour : 2026-05-19 (session 22 — motor_controller_node : PI fermé par roue sur encodeurs (KP=1.5, KI=0.3, anti-windup). autonomous_node : mission complète EXPLORING→ARUCO_APPROACH→COLLECTING→RETURNING→DONE, timeouts mouvement indépendants, stale pose, débounce US, rampe décel, fine alignment bouteille, séquence bras. rover_gui : pub `/rover/bottle_pos` branché sur bouton VALIDER.)*
