@@ -111,6 +111,8 @@ ARM_PICKUP_SEQ = [
 ARUCO_AREA_THRESHOLD = 5000.0   # px² à ~1 m — à calibrer sur le rover réel
 ARUCO_APPROACH_SPEED = 0.05     # m/s — vitesse d'approche visuelle lente
 ARUCO_MAX_ADVANCE_MM = 1500.0   # mm — sécurité : distance max sans seuil aire
+ARUCO_SEARCH_SPEED    = 0.15          # rad/s — rotation lente de recherche ArUco
+ARUCO_SEARCH_HALF_ARC = math.pi / 2  # rad — balayage ±90° autour de l'orientation initiale
 
 
 class _Mission(Enum):
@@ -123,6 +125,7 @@ class _Mission(Enum):
 
 
 class _ArUcoPhase(Enum):
+    SEARCHING   = auto()   # rotation lente jusqu'à trouver l'ArUco
     APPROACHING = auto()   # avance lentement, surveille l'aire
     BACKING_UP  = auto()   # recule de la même distance
 
@@ -184,6 +187,8 @@ class AutonomousNode(LifecycleNode):
         self._aruco_start_x          = 0.0
         self._aruco_start_y          = 0.0
         self._aruco_advance_dist     = 0.0
+        self._search_step            = 0     # 0=vers +90°, 1=vers -90°, 2=épuisé
+        self._search_origin_theta    = 0.0   # θ au début de la phase SEARCHING
 
         # Bouteille
         # _bottle_offset : (rel_x_mm, rel_y_mm) relatif au centre ArUco — envoyé par GUI
@@ -409,7 +414,7 @@ class AutonomousNode(LifecycleNode):
                 self._last_reason = 'cible ArUco atteinte directement — ' + self._mission.name
                 return
             elif cheby == 1:
-                # Case adjacente → approche visuelle lente vers ArUco
+                # Case adjacente → approche visuelle ArUco
                 self._transit_path.clear()
                 self._move = _Move.IDLE
                 aruco_x = tc * CELL_COL_MM + CELL_COL_MM / 2.0
@@ -418,10 +423,23 @@ class AutonomousNode(LifecycleNode):
                 self._aruco_start_x  = self._x
                 self._aruco_start_y  = self._y
                 self._aruco_advance_dist = 0.0
-                self._aruco_phase = _ArUcoPhase.APPROACHING
                 self._move_start_time = self.get_clock().now()
                 self._mission = _Mission.ARUCO_APPROACH
-                self._last_reason = f'adjacent ArUco ({tr},{tc}) — ARUCO_APPROACH'
+                # Marquer la case bouteille OBSTACLE si déjà connue
+                if self._bottle_world is not None:
+                    br = max(0, min(GRID_ROWS - 1, int(floor(self._bottle_world[1] / CELL_ROW_MM))))
+                    bc = max(0, min(GRID_COLS - 1, int(floor(self._bottle_world[0] / CELL_COL_MM))))
+                    if self._cells[br][bc] not in (CELL_BORDER, OBSTACLE):
+                        self._cells[br][bc] = OBSTACLE
+                        self._publish_grid_state()
+                if self._aruco_found:
+                    self._aruco_phase = _ArUcoPhase.APPROACHING
+                    self._last_reason = f'adjacent ArUco ({tr},{tc}) — ARUCO_APPROACH direct'
+                else:
+                    self._aruco_phase         = _ArUcoPhase.SEARCHING
+                    self._search_step         = 0
+                    self._search_origin_theta = self._theta
+                    self._last_reason = f'adjacent ArUco ({tr},{tc}) — ARUCO_APPROACH recherche'
                 self.get_logger().info(self._last_reason)
                 return
 
@@ -781,6 +799,8 @@ class AutonomousNode(LifecycleNode):
         self._aruco_start_x          = 0.0
         self._aruco_start_y          = 0.0
         self._aruco_advance_dist     = 0.0
+        self._search_step            = 0
+        self._search_origin_theta    = 0.0
         self._ambush_streak = 0
         self._collecting       = False
         self._arm_seq_idx      = 0
@@ -844,6 +864,14 @@ class AutonomousNode(LifecycleNode):
         self.get_logger().info(
             f'Position bouteille monde : ({self._bottle_world[0]:.0f},{self._bottle_world[1]:.0f}) mm'
         )
+        # Marquer la case bouteille OBSTACLE dès que connue (sauf COLLECTING où on y entre)
+        if self._cells and self._mission not in (_Mission.IDLE, _Mission.DONE, _Mission.COLLECTING):
+            br = max(0, min(GRID_ROWS - 1, int(floor(self._bottle_world[1] / CELL_ROW_MM))))
+            bc = max(0, min(GRID_COLS - 1, int(floor(self._bottle_world[0] / CELL_COL_MM))))
+            if self._cells[br][bc] not in (CELL_BORDER, OBSTACLE):
+                self._cells[br][bc] = OBSTACLE
+                self._publish_grid_state()
+                self.get_logger().info(f'Case bouteille ({br},{bc}) marquée OBSTACLE (ARUCO_APPROACH)')
 
     def _arm_pickup_tick(self):
         if self._arm_seq_idx >= len(ARM_PICKUP_SEQ):
@@ -876,6 +904,40 @@ class AutonomousNode(LifecycleNode):
                 self._last_reason = f'TIMEOUT ArUco {elapsed:.1f}s — {self._mission.name}'
                 self.get_logger().warn(self._last_reason)
                 return
+
+        if self._aruco_phase == _ArUcoPhase.SEARCHING:
+            if self._aruco_found:
+                self._stop()
+                self._aruco_approach_heading = self._theta
+                self._aruco_start_x  = self._x
+                self._aruco_start_y  = self._y
+                self._aruco_advance_dist = 0.0
+                self._aruco_phase = _ArUcoPhase.APPROACHING
+                self._last_reason = 'ArUco trouvé en recherche — passage APPROACHING'
+                self.get_logger().info(self._last_reason)
+                return
+
+            hi = _norm(self._search_origin_theta + ARUCO_SEARCH_HALF_ARC)
+            lo = _norm(self._search_origin_theta - ARUCO_SEARCH_HALF_ARC)
+
+            if self._search_step == 0:
+                delta = _norm(hi - self._theta)
+                if abs(delta) < ANGLE_TOL_RAD:
+                    self._search_step = 1
+                else:
+                    self._cmd(0.0, ARUCO_SEARCH_SPEED if delta > 0 else -ARUCO_SEARCH_SPEED)
+            elif self._search_step == 1:
+                delta = _norm(lo - self._theta)
+                if abs(delta) < ANGLE_TOL_RAD:
+                    self._search_step = 2
+                else:
+                    self._cmd(0.0, ARUCO_SEARCH_SPEED if delta > 0 else -ARUCO_SEARCH_SPEED)
+            else:
+                self._stop()
+                self._mission = _Mission.COLLECTING if self._bottle_world else _Mission.RETURNING
+                self._last_reason = 'ArUco non trouvé après ±90° — ' + self._mission.name
+                self.get_logger().warn(self._last_reason)
+            return
 
         if self._aruco_phase == _ArUcoPhase.APPROACHING:
             # Rotation d'alignement vers l'ArUco avant d'avancer
@@ -911,10 +973,24 @@ class AutonomousNode(LifecycleNode):
                 # Relocaliser la case courante depuis la pose odométrique
                 self._row = max(0, min(GRID_ROWS - 1, int(floor(self._y / CELL_ROW_MM))))
                 self._col = max(0, min(GRID_COLS - 1, int(floor(self._x / CELL_COL_MM))))
+                tr, tc = self._nav_goal
                 if self._bottle_world is not None:
+                    # Libérer la case bouteille (on va y rentrer pour ramasser)
+                    br = max(0, min(GRID_ROWS - 1, int(floor(self._bottle_world[1] / CELL_ROW_MM))))
+                    bc = max(0, min(GRID_COLS - 1, int(floor(self._bottle_world[0] / CELL_COL_MM))))
+                    if self._cells[br][bc] == OBSTACLE and (br, bc) != (tr, tc):
+                        self._cells[br][bc] = FREE
+                    # Marquer la case ArUco OBSTACLE (ne pas percuter le marqueur)
+                    if self._cells[tr][tc] not in (CELL_BORDER, OBSTACLE):
+                        self._cells[tr][tc] = OBSTACLE
+                    self._publish_grid_state()
                     self._mission = _Mission.COLLECTING
                     self._last_reason = 'recul ArUco terminé — COLLECTING'
                 else:
+                    # Marquer la case ArUco OBSTACLE pour le retour
+                    if self._cells[tr][tc] not in (CELL_BORDER, OBSTACLE):
+                        self._cells[tr][tc] = OBSTACLE
+                        self._publish_grid_state()
                     self._mission = _Mission.RETURNING
                     self._last_reason = 'recul ArUco terminé — RETURNING'
                 self.get_logger().info(self._last_reason)
