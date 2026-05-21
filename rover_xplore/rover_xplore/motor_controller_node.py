@@ -6,21 +6,17 @@
 #
 # CYCLE DE VIE (géré par mode_manager_node) :
 #   on_configure  → crée le publisher /rover/motor_cmd
-#   on_activate   → s'abonne à /rover/cmd_vel + /wheel_encoders, timer sécurité
-#   on_deactivate → publie zeros, détruit subscriptions + timer, reset PI
+#   on_activate   → s'abonne à /rover/cmd_vel, timer sécurité
+#   on_deactivate → publie zeros, détruit subscriptions + timer
 #   on_cleanup    → détruit le publisher
 #
 # CINÉMATIQUE DIFFÉRENTIELLE (tank drive) :
 #   v_left  = linear - angular × WHEEL_BASE / 2
 #   v_right = linear + angular × WHEEL_BASE / 2
 #
-# CONTRÔLE PI FERMÉ PAR ROUE :
-#   Setpoint : Δticks/100ms calculé depuis le Twist reçu.
-#   Feedback : Δticks/100ms mesuré par l'ESP32 sur /wheel_encoders.
-#   Sortie   : PWM [-100..100] vers /rover/motor_cmd.
-#   Les moteurs ne sont commandés qu'à la réception d'encodeurs (10 Hz).
-#   Si les encodeurs ne répondent plus → serial_bridge coupe les moteurs
-#   après MOTOR_TIMEOUT_S (fail-safe matériel).
+# CONTRÔLE EN BOUCLE OUVERTE :
+#   PWM = clamp(v / MAX_SPEED_MS × 100, −100, 100)
+#   Publié immédiatement à chaque Twist reçu.
 #
 # MAPPING ROUES :
 #   motor1 = Front Right  → v_right
@@ -30,15 +26,12 @@
 #
 # TOPICS ÉCOUTÉS (uniquement en Active) :
 #   /rover/cmd_vel    geometry_msgs/Twist
-#   /wheel_encoders   std_msgs/Int32MultiArray  [FR, FL, BR, BL]  Δticks/100ms
 #
 # TOPICS PUBLIÉS :
 #   /rover/motor_cmd  std_msgs/Int32MultiArray  [FR, FL, BR, BL]  (-100..100)
 #
-# SÉCURITÉ : timeout 500ms sans cmd_vel → setpoints à zéro + reset PI.
+# SÉCURITÉ : timeout 500ms sans cmd_vel → PWM forcé à zéro.
 # ══════════════════════════════════════════════════════════════════════════════
-
-from math import pi
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -50,20 +43,20 @@ def _clamp(v: float, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(round(v))))
 
 
-# ── Physique — à calibrer en même temps que odometry_node ────────────────────
-WHEEL_DIAMETER_MM = 120.0
-TICKS_PER_REV     = 1320
-MM_PER_TICK       = (pi * WHEEL_DIAMETER_MM) / TICKS_PER_REV   # ≈ 0.285 mm/tick
-WHEEL_BASE        = 0.25    # m
-DT                = 0.1     # s — période encodeurs (serial_bridge 10 Hz)
+WHEEL_BASE = 0.25    # m
 
-MAX_ENC_TICKS  = 30.0   # Δticks/100ms à 100 PWM — à affiner par mesure
+# ── Physique (conservé pour référence / réactivation PID) ────────────────────
+# from math import pi
+# WHEEL_DIAMETER_MM = 120.0
+# TICKS_PER_REV     = 1320
+# MM_PER_TICK       = (pi * WHEEL_DIAMETER_MM) / TICKS_PER_REV   # ≈ 0.285 mm/tick
+# DT                = 0.1     # s — période encodeurs (serial_bridge 10 Hz)
+# MAX_ENC_TICKS     = 30.0   # Δticks/100ms à 100 PWM
 
-# ── Gains PI — à calibrer sur le vrai rover ───────────────────────────────────
-# Unités : erreur et intégrateur en Δticks/100ms, sortie en PWM [-100..100]
-KP             = 1.5
-KI             = 0.3
-INTEGRAL_CLAMP = 40.0   # anti-windup
+# ── Gains PI (désactivé — boucle ouverte) ────────────────────────────────────
+# KP             = 1.5
+# KI             = 0.3
+# INTEGRAL_CLAMP = 40.0
 
 
 class MotorControllerNode(LifecycleNode):
@@ -76,16 +69,13 @@ class MotorControllerNode(LifecycleNode):
 
         self._pub          = None
         self._sub_cmd_vel  = None
-        self._sub_encoders = None
         self._timer_safety = None
         self._last_cmd_time = None
 
-        # Setpoints en Δticks/100ms (mis à jour par _cmd_cb)
-        self._tgt_left  = 0.0
-        self._tgt_right = 0.0
-
-        # État PI : [0]=gauche, [1]=droite
-        self._integral = [0.0, 0.0]
+        # ── État PI (désactivé — conservé pour réactivation future) ──────────
+        # self._tgt_left  = 0.0
+        # self._tgt_right = 0.0
+        # self._integral  = [0.0, 0.0]
 
     # ── Lifecycle callbacks ───────────────────────────────────────────────────
 
@@ -96,28 +86,23 @@ class MotorControllerNode(LifecycleNode):
 
     def on_activate(self, state):
         self._last_cmd_time = self.get_clock().now()
-        self._reset_pi()
         self._sub_cmd_vel  = self.create_subscription(
             Twist, '/rover/cmd_vel', self._cmd_cb, 10
         )
-        self._sub_encoders = self.create_subscription(
-            Int32MultiArray, '/wheel_encoders', self._encoder_cb, 10
-        )
+        # ── Encodeurs (désactivés — boucle ouverte) ──────────────────────────
+        # self._sub_encoders = self.create_subscription(
+        #     Int32MultiArray, '/wheel_encoders', self._encoder_cb, 10
+        # )
         self._timer_safety = self.create_timer(0.1, self._check_timeout)
-        self.get_logger().info('motor_controller_node actif')
+        self.get_logger().info('motor_controller_node actif (boucle ouverte)')
         return TransitionCallbackReturn.SUCCESS
 
     def on_deactivate(self, state):
-        self._tgt_left = self._tgt_right = 0.0
-        self._reset_pi()
         self._publish_pwm(0, 0)
 
         if self._sub_cmd_vel is not None:
             self.destroy_subscription(self._sub_cmd_vel)
             self._sub_cmd_vel = None
-        if self._sub_encoders is not None:
-            self.destroy_subscription(self._sub_encoders)
-            self._sub_encoders = None
         if self._timer_safety is not None:
             self.destroy_timer(self._timer_safety)
             self._timer_safety = None
@@ -142,46 +127,41 @@ class MotorControllerNode(LifecycleNode):
             pass
         super().destroy_node()
 
-    # ── Réception Twist ───────────────────────────────────────────────────────
+    # ── Réception Twist → PWM direct ─────────────────────────────────────────
 
     def _cmd_cb(self, msg: Twist):
         self._last_cmd_time = self.get_clock().now()
-        v_left  = msg.linear.x - msg.angular.z * WHEEL_BASE / 2.0   # m/s
+        v_left  = msg.linear.x - msg.angular.z * WHEEL_BASE / 2.0
         v_right = msg.linear.x + msg.angular.z * WHEEL_BASE / 2.0
-        # Convertir m/s → Δticks/100ms, borné au max physique
-        k = 1000.0 * DT / MM_PER_TICK
-        self._tgt_left  = max(-MAX_ENC_TICKS, min(MAX_ENC_TICKS, v_left  * k))
-        self._tgt_right = max(-MAX_ENC_TICKS, min(MAX_ENC_TICKS, v_right * k))
-
-    # ── Boucle PI (appelée à chaque réception encodeurs, 10 Hz) ──────────────
-
-    def _encoder_cb(self, msg: Int32MultiArray):
-        if len(msg.data) < 4:
-            return
-        FR, FL, BR, BL = msg.data[:4]
-        actual_left  = (FL + BL) / 2.0   # Δticks/100ms côté gauche
-        actual_right = (FR + BR) / 2.0   # Δticks/100ms côté droit
-
-        pwm_left  = self._pi(0, self._tgt_left,  actual_left)
-        pwm_right = self._pi(1, self._tgt_right, actual_right)
+        pwm_left  = _clamp(v_left  / self.MAX_SPEED_MS * 100.0, -100, 100)
+        pwm_right = _clamp(v_right / self.MAX_SPEED_MS * 100.0, -100, 100)
         self._publish_pwm(pwm_left, pwm_right)
 
-    def _pi(self, side: int, target: float, actual: float) -> int:
-        error = target - actual
+    # ── Boucle PI (désactivée — conservée pour réactivation future) ──────────
 
-        # Vider l'intégrateur à l'arrêt pour éviter le windup au redémarrage
-        if target == 0.0:
-            self._integral[side] = 0.0
-        else:
-            self._integral[side] = max(
-                -INTEGRAL_CLAMP,
-                min(INTEGRAL_CLAMP, self._integral[side] + error)
-            )
+    # def _encoder_cb(self, msg: Int32MultiArray):
+    #     if len(msg.data) < 4:
+    #         return
+    #     FR, FL, BR, BL = msg.data[:4]
+    #     actual_left  = (FL + BL) / 2.0
+    #     actual_right = (FR + BR) / 2.0
+    #     pwm_left  = self._pi(0, self._tgt_left,  actual_left)
+    #     pwm_right = self._pi(1, self._tgt_right, actual_right)
+    #     self._publish_pwm(pwm_left, pwm_right)
 
-        return _clamp(KP * error + KI * self._integral[side], -100, 100)
+    # def _pi(self, side: int, target: float, actual: float) -> int:
+    #     error = target - actual
+    #     if target == 0.0:
+    #         self._integral[side] = 0.0
+    #     else:
+    #         self._integral[side] = max(
+    #             -INTEGRAL_CLAMP,
+    #             min(INTEGRAL_CLAMP, self._integral[side] + error)
+    #         )
+    #     return _clamp(KP * error + KI * self._integral[side], -100, 100)
 
-    def _reset_pi(self):
-        self._integral = [0.0, 0.0]
+    # def _reset_pi(self):
+    #     self._integral = [0.0, 0.0]
 
     # ── Timeout sécurité ──────────────────────────────────────────────────────
 
@@ -190,8 +170,7 @@ class MotorControllerNode(LifecycleNode):
             return
         elapsed = (self.get_clock().now() - self._last_cmd_time).nanoseconds / 1e9
         if elapsed > self.TIMEOUT_SEC:
-            self._tgt_left = self._tgt_right = 0.0
-            self._reset_pi()
+            self._publish_pwm(0, 0)
 
     # ── Publication ───────────────────────────────────────────────────────────
 
