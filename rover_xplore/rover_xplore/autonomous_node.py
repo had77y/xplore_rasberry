@@ -73,8 +73,8 @@ ARRIVAL_TOL_FINE_MM = 40     # mm — tolérance fine alignment (alignement bout
 KP_ROT         = 1.5     # gain P rotation
 MAX_ROT_SPEED  = 0.8     # rad/s
 DECEL_START_MM = 500     # distance à partir de laquelle on commence à freiner
-MIN_SPEED      = 0.07    # m/s — vitesse minimale d'approche
-MAX_SPEED      = 0.25    # m/s
+MIN_SPEED      = 0.03    # m/s — vitesse minimale d'approche  (≈ 10 ticks)
+MAX_SPEED      = 0.08    # m/s — vitesse max physique (30 ticks × MM_PER_TICK / 100ms)
 KA             = 0.5     # gain correction angulaire pendant MOVING
 
 AMBUSH_LIMIT   = 5       # AMBUSH consécutifs max avant arrêt d'urgence

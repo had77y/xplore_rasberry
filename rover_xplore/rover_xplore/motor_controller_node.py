@@ -57,6 +57,8 @@ MM_PER_TICK       = (pi * WHEEL_DIAMETER_MM) / TICKS_PER_REV   # ≈ 0.285 mm/ti
 WHEEL_BASE        = 0.25    # m
 DT                = 0.1     # s — période encodeurs (serial_bridge 10 Hz)
 
+MAX_ENC_TICKS  = 30.0   # Δticks/100ms à 100 PWM — à affiner par mesure
+
 # ── Gains PI — à calibrer sur le vrai rover ───────────────────────────────────
 # Unités : erreur et intégrateur en Δticks/100ms, sortie en PWM [-100..100]
 KP             = 1.5
@@ -146,10 +148,10 @@ class MotorControllerNode(LifecycleNode):
         self._last_cmd_time = self.get_clock().now()
         v_left  = msg.linear.x - msg.angular.z * WHEEL_BASE / 2.0   # m/s
         v_right = msg.linear.x + msg.angular.z * WHEEL_BASE / 2.0
-        # Convertir m/s → Δticks/100ms (unité naturelle du PI)
+        # Convertir m/s → Δticks/100ms, borné au max physique
         k = 1000.0 * DT / MM_PER_TICK
-        self._tgt_left  = v_left  * k
-        self._tgt_right = v_right * k
+        self._tgt_left  = max(-MAX_ENC_TICKS, min(MAX_ENC_TICKS, v_left  * k))
+        self._tgt_right = max(-MAX_ENC_TICKS, min(MAX_ENC_TICKS, v_right * k))
 
     # ── Boucle PI (appelée à chaque réception encodeurs, 10 Hz) ──────────────
 
