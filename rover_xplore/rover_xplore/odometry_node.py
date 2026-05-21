@@ -39,6 +39,7 @@ WHEEL_DIAMETER_MM = 120.0
 WHEEL_BASE_MM     = 250.0
 TICKS_PER_REV     = 1320                                # JGA25-370 30:1 — à calibrer
 MM_PER_TICK       = (pi * WHEEL_DIAMETER_MM) / TICKS_PER_REV   # ≈ 0.285 mm/tick
+ENC_SIGN          = -1                                  # encodeurs négatifs en avance → inverser
 
 # ── Filtre complémentaire ─────────────────────────────────────────────────────
 ALPHA        = 0.95                      # poids gyro
@@ -102,7 +103,7 @@ class OdometryNode(Node):
         if len(msg.data) < 4 or not self._calibrated:
             return
 
-        m1, m2, m3, m4 = msg.data[:4]   # FR, FL, BR, BL (Δticks / 100ms)
+        m1, m2, m3, m4 = [ENC_SIGN * v for v in msg.data[:4]]   # FR, FL, BR, BL (Δticks / 100ms)
 
         d_right  = ((m1 + m3) / 2.0) * MM_PER_TICK
         d_left   = ((m2 + m4) / 2.0) * MM_PER_TICK
