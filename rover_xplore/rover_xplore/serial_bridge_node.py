@@ -111,6 +111,7 @@ class SerialBridgeNode(Node):
     def _flush_cb(self, _msg: Empty):
         if self._ser and self._ser.is_open:
             self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
             self.get_logger().info('Buffer série vidé (flush_serial)')
 
     # ── Tick 10 Hz ────────────────────────────────────────────────────────────
