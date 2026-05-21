@@ -5,23 +5,17 @@
 #         Seul propriétaire du port série — aucun autre node ne touche au port.
 #         Toujours actif, indépendant du mode.
 #
-# PROTOCOLE request-response : l'ESP32 n'envoie QUE quand il reçoit.
-#   → Le Pi envoie une trame, l'ESP32 répond immédiatement.
-#
-# ENVOI (Pi → ESP32) à 10 Hz — b"rover" + struct 18 octets little-endian :
+# ENVOI (Pi → ESP32) à 10 Hz — struct 18 octets little-endian :
 #   int16  servo_1, servo_2, servo_3, servo_4   (-100..100)
 #   int16  motor1..4                             (-100..100)
 #   int16  stepper                               (-1 / 0 / +1)
 #
-# RÉCEPTION (ESP32 → Pi) — b"rover" + struct 30 octets :
+# RÉCEPTION (ESP32 → Pi) — struct 30 octets :
 #   int16  accel_x/y/z, gyro_x/y/z             (IMU brut, signé)
 #   int16  motor1..4                             (vitesses encodeurs roues)
 #   uint16 distance_1..5                         (US en mm)
 #
 # SÉCURITÉ :
-#   Header ASCII b"rover" en tête de chaque trame (Pi→ESP32 et ESP32→Pi).
-#   Le récepteur cherche ce marqueur avant de décoder — alignement robuste
-#   même après reset, bruit UART ou buffer overflow.
 #   Si aucun motor_cmd reçu depuis MOTOR_TIMEOUT_S → moteurs forcés à zéro.
 #   Si aucun arm_serial_cmd reçu depuis ARM_TIMEOUT_S → stepper forcé à zéro.
 #
@@ -44,10 +38,9 @@ from std_msgs.msg import Float32MultiArray, Int32MultiArray
 
 import serial
 
-_MAGIC     = b'rover'
-_FMT_SEND  = '<9h'                          # 18 octets : 9 × int16
-_FMT_RECV  = '<10h5H'                       # 30 octets : 10 × int16 + 5 × uint16
-_SIZE_DATA = struct.calcsize(_FMT_RECV)     # 30
+_FMT_SEND  = '<9h'      # 18 octets : 9 × int16 (servos×4, motors×4, stepper)
+_FMT_RECV  = '<10h5H'  # 30 octets : 10 × int16 (IMU×6, encodeurs×4) + 5 × uint16 (US)
+_SIZE_RECV = struct.calcsize(_FMT_RECV)
 
 MOTOR_TIMEOUT_S = 1.0   # sécurité : zéro moteurs si plus de commande depuis 1s
 ARM_TIMEOUT_S   = 1.0   # sécurité : zéro stepper si plus de commande depuis 1s
@@ -76,7 +69,6 @@ class SerialBridgeNode(Node):
 
         self._ser = None
         self._reconnect_ticks = 0
-        self._rx_buffer = bytearray()
         self._connect_serial()
 
         self.create_subscription(Int32MultiArray, '/rover/motor_cmd',      self._motor_cb, 10)
@@ -150,7 +142,7 @@ class SerialBridgeNode(Node):
         if not self._ser or not self._ser.is_open:
             return
 
-        payload = _MAGIC + struct.pack(
+        payload = struct.pack(
             _FMT_SEND,
             self._servos[0], self._servos[1], self._servos[2], self._servos[3],
             self._motors[0], self._motors[1], self._motors[2], self._motors[3],
@@ -171,28 +163,16 @@ class SerialBridgeNode(Node):
 
         try:
             available = self._ser.in_waiting
-            if available <= 0:
+            if available < _SIZE_RECV:
                 return
 
-            self._rx_buffer.extend(self._ser.read(available))
-
-            # Cherche la dernière occurrence du magic (trame la plus récente).
-            # Fonctionne même si le buffer contient plusieurs trames ou des
-            # octets parasites — les trames incomplètes restent en attente.
-            idx = self._rx_buffer.rfind(_MAGIC)
-            if idx == -1:
-                # Garde seulement une petite fenêtre au cas où le header arrive
-                # coupé entre deux lectures.
-                del self._rx_buffer[:-len(_MAGIC)]
+            all_data  = self._ser.read(available)
+            n_complete = len(all_data) // _SIZE_RECV
+            if n_complete == 0:
                 return
 
-            data_start = idx + len(_MAGIC)
-            if len(self._rx_buffer) - data_start < _SIZE_DATA:
-                return  # trame incomplète après le magic
-
-            frame_end = data_start + _SIZE_DATA
-            raw  = self._rx_buffer[data_start:frame_end]
-            del self._rx_buffer[:frame_end]
+            # Prendre la dernière trame complète (la plus récente)
+            raw  = all_data[(n_complete - 1) * _SIZE_RECV : n_complete * _SIZE_RECV]
             vals = struct.unpack(_FMT_RECV, raw)
 
             ax, ay, az, gx, gy, gz = vals[0:6]
