@@ -1,13 +1,14 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # autonomous_node.py — Raspberry Pi  (LifecycleNode)
 #
-# Navigation autonome case par case sur une grille 12×8.
+# Navigation autonome case par case sur une grille 8×8.
 # Algorithme greedy BFS + backtracking AMBUSH.
 #
 # GRILLE :
-#   12 lignes × 8 colonnes (10×6 navigables + 1 rangée bordure tout autour)
-#   CELL_ROW_MM=800, CELL_COL_MM=833
-#   Départ : (row=10, col=6)  Cible ArUco : (row=1, col=1)
+#   8 lignes × 8 colonnes (6×6 navigables + 1 rangée bordure tout autour)
+#   CELL_ROW_MM=833, CELL_COL_MM=833  → terrain 5m×5m
+#   Départ/cible : envoyés par le GUI via /rover/nav_goal — valeurs ci-dessous = défauts
+#   Départ : (row=1, col=1)  Cible ArUco : (row=6, col=6)
 #
 # MACHINE D'ÉTATS :
 #   IDLE → (nav_goal reçu) → EXPLORING → RETURNING → DONE
@@ -22,7 +23,7 @@
 #
 # TOPICS PUBLIÉS :
 #   /rover/cmd_vel    geometry_msgs/Twist
-#   /rover/grid_state Int32MultiArray  [96 valeurs]  — état de chaque case (row-major)
+#   /rover/grid_state Int32MultiArray  [64 valeurs]  — état de chaque case (row-major)
 # ══════════════════════════════════════════════════════════════════════════════
 
 import math
@@ -36,11 +37,11 @@ from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
 from std_msgs.msg import Float32MultiArray, Int32MultiArray, String
 
 # ── Grille ────────────────────────────────────────────────────────────────────
-GRID_ROWS    = 12
+GRID_ROWS    = 8
 GRID_COLS    = 8
-CELL_ROW_MM  = 800
+CELL_ROW_MM  = 833
 CELL_COL_MM  = 833
-CELL_DIAG_MM = sqrt(CELL_ROW_MM**2 + CELL_COL_MM**2)   # ≈ 1155 mm
+CELL_DIAG_MM = sqrt(CELL_ROW_MM**2 + CELL_COL_MM**2)   # ≈ 1178 mm
 
 UNDISCOVERED = 0
 FREE         = 1
@@ -48,11 +49,11 @@ OBSTACLE     = 2
 AMBUSH       = 3
 CELL_BORDER  = 4
 
-START  = (10, 6)    # (row, col) — bas-droite
-TARGET = (1,  1)    # (row, col) — haut-gauche (ArUco)
+START  = (1, 1)    # (row, col) — défaut GUI : haut-gauche
+TARGET = (6, 6)    # (row, col) — défaut GUI : bas-droite (ArUco)
 
-# Priorité Chebyshev : max_dist = max(|10-1|, |6-1|) = max(9, 5) = 9
-_MAX_DIST = 9
+# Priorité Chebyshev : max_dist = max(|1-6|, |1-6|) = 5
+_MAX_DIST = 5
 
 # ── Capteurs ultrasoniques ────────────────────────────────────────────────────
 # (sx_mm, sy_mm, angle_rad, seuil_mm) — repère rover : x=avant, y=gauche
