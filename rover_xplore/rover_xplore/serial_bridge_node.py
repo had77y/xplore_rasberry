@@ -22,6 +22,7 @@
 # TOPICS ÉCOUTÉS :
 #   /rover/motor_cmd      Int32MultiArray [m1, m2, m3, m4]       (-100..100)
 #   /rover/arm_serial_cmd Int32MultiArray [s1, s2, s3, s4, step] (step = -1/0/+1)
+#   /rover/flush_serial   Empty           vide le buffer UART entrant (bouton GUI)
 #
 # TOPICS PUBLIÉS :
 #   /ultrasonic     Float32MultiArray [d1..d5] en mm
@@ -34,7 +35,7 @@ import struct
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Float32MultiArray, Int32MultiArray
+from std_msgs.msg import Empty, Float32MultiArray, Int32MultiArray
 
 import serial
 
@@ -71,8 +72,9 @@ class SerialBridgeNode(Node):
         self._reconnect_ticks = 0
         self._connect_serial()
 
-        self.create_subscription(Int32MultiArray, '/rover/motor_cmd',      self._motor_cb, 10)
-        self.create_subscription(Int32MultiArray, '/rover/arm_serial_cmd', self._arm_cb,   10)
+        self.create_subscription(Int32MultiArray, '/rover/motor_cmd',      self._motor_cb,  10)
+        self.create_subscription(Int32MultiArray, '/rover/arm_serial_cmd', self._arm_cb,    10)
+        self.create_subscription(Empty,           '/rover/flush_serial',   self._flush_cb,  10)
 
         self._pub_us  = self.create_publisher(Float32MultiArray, '/ultrasonic',     10)
         self._pub_imu = self.create_publisher(Imu,               '/imu/raw',        10)
@@ -105,6 +107,11 @@ class SerialBridgeNode(Node):
             self._servos  = [_clamp(int(v), -100, 100) for v in msg.data[:4]]
             self._stepper = _clamp(int(msg.data[4]), -1, 1)
             self._last_arm_time = self.get_clock().now()
+
+    def _flush_cb(self, _msg: Empty):
+        if self._ser and self._ser.is_open:
+            self._ser.reset_input_buffer()
+            self.get_logger().info('Buffer série vidé (flush_serial)')
 
     # ── Tick 10 Hz ────────────────────────────────────────────────────────────
 
