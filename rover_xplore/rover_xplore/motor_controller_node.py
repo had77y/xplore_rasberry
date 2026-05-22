@@ -178,7 +178,7 @@ class MotorControllerNode(LifecycleNode):
         if self._pub is None:
             return
         msg = Int32MultiArray()
-        msg.data = [-left, right, -right, left]   # FR, FL, BR, BL
+        msg.data = [left, right, -right, -left]   # FR, FL, BR, BL
         self._pub.publish(msg)
 
 
