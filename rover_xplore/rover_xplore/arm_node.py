@@ -107,7 +107,7 @@ class ArmNode(LifecycleNode):
         if self._pub is None:
             return
         msg = Int32MultiArray()
-        msg.data = [s1, s2, s3, s4, stepper]
+        msg.data = [s1, s2, -s3, s4, stepper]
         self._pub.publish(msg)
 
 
