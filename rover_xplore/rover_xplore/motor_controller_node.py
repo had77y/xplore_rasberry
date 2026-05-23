@@ -43,7 +43,7 @@ def _clamp(v: float, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(round(v))))
 
 
-WHEEL_BASE = 0.25    # m
+WHEEL_BASE = 0.50    # m — calibré pour pwm_slow=75 en arc pleine vitesse
 
 # ── Physique (conservé pour référence / réactivation PID) ────────────────────
 # from math import pi
